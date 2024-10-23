@@ -60,8 +60,7 @@ class DownloadAndLoadMochiModel:
                     {"tooltip": "Downloads from 'https://huggingface.co/Kijai/Mochi_preview_comfy' to 'models/vae/mochi'", },
                 ),
                  "precision": (["fp8_e4m3fn","fp8_e4m3fn_fast","fp16", "fp32", "bf16"],
-                    {"default": "fp8_e4m3fn", }),
-                "attention_mode": (["sdpa","flash_attn","sage_attn"],
+                    {"default": "fp8_e4m3fn", }
                 ),
             },
         }
@@ -72,7 +71,7 @@ class DownloadAndLoadMochiModel:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "Downloads and loads the selected Mochi model from Huggingface"
 
-    def loadmodel(self, model, vae, precision, attention_mode):
+    def loadmodel(self, model, vae, precision):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -116,7 +115,6 @@ class DownloadAndLoadMochiModel:
             dit_checkpoint_path=model_path,
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
-            attention_mode=attention_mode
         )
         with (init_empty_weights() if is_accelerate_available else nullcontext()):
             vae = Decoder(

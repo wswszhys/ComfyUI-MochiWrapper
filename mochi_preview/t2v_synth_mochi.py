@@ -119,7 +119,6 @@ class T2VSynthMochiModel:
         dit_checkpoint_path: str,
         weight_dtype: torch.dtype = torch.float8_e4m3fn,
         fp8_fastmode: bool = False,
-        attention_mode: str = "sdpa"
     ):
         super().__init__()
         self.device = device
@@ -145,7 +144,6 @@ class T2VSynthMochiModel:
                 t5_feat_dim=4096,
                 t5_token_length=256,
                 rope_theta=10000.0,
-                attention_mode=attention_mode,
             )
 
         params_to_keep = {"t_embedder", "x_embedder", "pos_frequencies", "t5", "norm"}
