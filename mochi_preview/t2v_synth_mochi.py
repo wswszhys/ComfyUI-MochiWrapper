@@ -113,14 +113,17 @@ class T2VSynthMochiModel:
     def __init__(
         self,
         *,
-        device_id: int,
+        device: torch.device,
+        offload_device: torch.device,
         vae_stats_path: str,
         dit_checkpoint_path: str,
         weight_dtype: torch.dtype = torch.float8_e4m3fn,
+        fp8_fastmode: bool = False,
     ):
         super().__init__()
         t = Timer()
-        self.device = torch.device(device_id)
+        self.device = device
+        self.offload_device = offload_device
 
         with t("construct_dit"):
                 from .dit.joint_model.asymm_models_joint import (
@@ -162,6 +165,10 @@ class T2VSynthMochiModel:
                         param.data = param.data.to(weight_dtype)
                     else:
                         param.data = param.data.to(torch.bfloat16)
+            
+            if fp8_fastmode:
+                from ..fp8_optimization import convert_fp8_linear
+                convert_fp8_linear(model, torch.bfloat16)
 
         self.dit = model
         self.dit.eval()
@@ -211,7 +218,7 @@ class T2VSynthMochiModel:
                 caption_input_ids_t5, caption_attention_mask_t5
             ).last_hidden_state.detach().to(torch.float32)
         )
-        self.t5_enc.to("cpu")
+        self.t5_enc.to(self.offload_device)
         # Sometimes returns a tensor, othertimes a tuple, not sure why
         # See: https://huggingface.co/genmo/mochi-1-preview/discussions/3
         assert tuple(y_feat[-1].shape) == (B, MAX_T5_TOKEN_LENGTH, 4096)
@@ -367,7 +374,7 @@ class T2VSynthMochiModel:
         if batch_cfg:
             z = z[:B]
         z = z.tensor_split(cp_size, dim=2)[cp_rank]  # split along temporal dim
-        self.dit.to("cpu")
+        self.dit.to(self.offload_device)
     
         samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
         print("samples: ", samples.shape, samples.dtype, samples.device)
