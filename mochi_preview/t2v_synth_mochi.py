@@ -127,7 +127,7 @@ class T2VSynthMochiModel:
 
         print("Initializing model...")
         with (init_empty_weights() if is_accelerate_available else nullcontext()):
-            model: nn.Module = AsymmDiTJoint(
+            model = AsymmDiTJoint(
                 depth=48,
                 patch_size=2,
                 num_heads=24,
