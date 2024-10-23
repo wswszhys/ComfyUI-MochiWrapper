@@ -1,17 +1,10 @@
 import os
 import torch
-import torch.nn as nn
 import folder_paths
 import comfy.model_management as mm
 from comfy.utils import ProgressBar, load_torch_file
 from einops import rearrange
-
-from contextlib import nullcontext
-
-from PIL import Image
-import numpy as np
-import json
-
+from tqdm import tqdm
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
@@ -295,11 +288,11 @@ class MochiDecode:
                 # Split z into overlapping tiles and decode them separately.
                 # The tiles have an overlap to avoid seams between tiles.
                 rows = []
-                for i in range(0, height, overlap_height):
+                for i in tqdm(range(0, height, overlap_height), desc="Processing rows"):
                     row = []
-                    for j in range(0, width, overlap_width):
+                    for j in tqdm(range(0, width, overlap_width), desc="Processing columns", leave=False):
                         time = []
-                        for k in range(num_frames // frame_batch_size):
+                        for k in tqdm(range(num_frames // frame_batch_size), desc="Processing frames", leave=False):
                             remaining_frames = num_frames % frame_batch_size
                             start_frame = frame_batch_size * k + (0 if k == 0 else remaining_frames)
                             end_frame = frame_batch_size * (k + 1) + remaining_frames
@@ -316,9 +309,9 @@ class MochiDecode:
                     rows.append(row)
 
                 result_rows = []
-                for i, row in enumerate(rows):
+                for i, row in enumerate(tqdm(rows, desc="Blending rows")):
                     result_row = []
-                    for j, tile in enumerate(row):
+                    for j, tile in enumerate(tqdm(row, desc="Blending tiles", leave=False)):
                         # blend the above tile and the left tile
                         # to the current tile and add the current tile to the result row
                         if i > 0:
