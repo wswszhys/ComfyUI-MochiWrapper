@@ -12,6 +12,15 @@ log = logging.getLogger(__name__)
 from .mochi_preview.t2v_synth_mochi import T2VSynthMochiModel
 from .mochi_preview.vae.model import Decoder
 
+from contextlib import nullcontext
+try:
+    from accelerate import init_empty_weights
+    from accelerate.utils import set_module_tensor_to_device
+    is_accelerate_available = True
+except:
+    is_accelerate_available = False
+    pass
+
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
 def linear_quadratic_schedule(num_steps, threshold_noise, linear_steps=None):
@@ -40,11 +49,13 @@ class DownloadAndLoadMochiModel:
                     [   
                         "mochi_preview_dit_fp8_e4m3fn.safetensors",
                     ],
+                    {"tooltip": "Downloads from 'https://huggingface.co/Kijai/Mochi_preview_comfy' to 'models/diffusion_models/mochi'", },
                 ),
                 "vae": (
                     [   
                         "mochi_preview_vae_bf16.safetensors",
                     ],
+                    {"tooltip": "Downloads from 'https://huggingface.co/Kijai/Mochi_preview_comfy' to 'models/vae/mochi'", },
                 ),
                  "precision": (["fp8_e4m3fn","fp16", "fp32", "bf16"],
                     {"default": "fp8_e4m3fn", }
@@ -101,25 +112,30 @@ class DownloadAndLoadMochiModel:
             dit_checkpoint_path=model_path,
             weight_dtype=dtype,
         )
-        vae = Decoder(
-                out_channels=3,
-                base_channels=128,
-                channel_multipliers=[1, 2, 4, 6],
-                temporal_expansions=[1, 2, 3],
-                spatial_expansions=[2, 2, 2],
-                num_res_blocks=[3, 3, 4, 6, 3],
-                latent_dim=12,
-                has_attention=[False, False, False, False, False],
-                padding_mode="replicate",
-                output_norm=False,
-                nonlinearity="silu",
-                output_nonlinearity="silu",
-                causal=True,
-            )
-        decoder_sd = load_torch_file(vae_path)
-        vae.load_state_dict(decoder_sd, strict=True)
-        vae.eval().to(torch.bfloat16).to("cpu")
-        del decoder_sd
+        with (init_empty_weights() if is_accelerate_available else nullcontext()):
+            vae = Decoder(
+                    out_channels=3,
+                    base_channels=128,
+                    channel_multipliers=[1, 2, 4, 6],
+                    temporal_expansions=[1, 2, 3],
+                    spatial_expansions=[2, 2, 2],
+                    num_res_blocks=[3, 3, 4, 6, 3],
+                    latent_dim=12,
+                    has_attention=[False, False, False, False, False],
+                    padding_mode="replicate",
+                    output_norm=False,
+                    nonlinearity="silu",
+                    output_nonlinearity="silu",
+                    causal=True,
+                )
+        vae_sd = load_torch_file(vae_path)
+        if is_accelerate_available:
+            for key in vae_sd:
+                set_module_tensor_to_device(vae, key, dtype=torch.float32, device=device, value=vae_sd[key])
+        else:
+            vae.load_state_dict(vae_sd, strict=True)
+            vae.eval().to(torch.bfloat16).to("cpu")
+        del vae_sd
 
         return (model, vae,)
     

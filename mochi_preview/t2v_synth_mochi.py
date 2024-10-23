@@ -13,7 +13,16 @@ from torch import nn
 from .dit.joint_model.context_parallel import get_cp_rank_size
 from .utils import Timer
 from tqdm import tqdm
-from comfy.utils import ProgressBar
+from comfy.utils import ProgressBar, load_torch_file
+
+from contextlib import nullcontext
+try:
+    from accelerate import init_empty_weights
+    from accelerate.utils import set_module_tensor_to_device
+    is_accelerate_available = True
+except:
+    is_accelerate_available = False
+    pass
 
 MAX_T5_TOKEN_LENGTH = 256
 
@@ -138,29 +147,33 @@ class T2VSynthMochiModel:
                     rope_theta=10000.0,
                 )
         with t("dit_load_checkpoint"):
-            
-            model.load_state_dict(load_file(dit_checkpoint_path))
+            params_to_keep = {"t_embedder", "x_embedder", "pos_frequencies", "t5", "norm"}
+            dit_sd = load_torch_file(dit_checkpoint_path)
+            if is_accelerate_available:
+                for name, param in model.named_parameters():
+                    if not any(keyword in name for keyword in params_to_keep):
+                        set_module_tensor_to_device(model, name, dtype=weight_dtype, device=self.device, value=dit_sd[name])
+                    else:
+                        set_module_tensor_to_device(model, name, dtype=torch.bfloat16, device=self.device, value=dit_sd[name])
+            else:
+                model.load_state_dict(dit_sd)
+                for name, param in self.dit.named_parameters():
+                    if not any(keyword in name for keyword in params_to_keep):
+                        param.data = param.data.to(weight_dtype)
+                    else:
+                        param.data = param.data.to(torch.bfloat16)
 
-        #with t("fsdp_dit"):
         self.dit = model
         self.dit.eval()
-        for name, param in self.dit.named_parameters():
-            params_to_keep = {"t_embedder", "x_embedder", "pos_frequencies", "t5", "norm"}
-            if not any(keyword in name for keyword in params_to_keep):
-                param.data = param.data.to(weight_dtype)
-            else:
-                param.data = param.data.to(torch.bfloat16)
         
-
         vae_stats = json.load(open(vae_stats_path))
         self.vae_mean = torch.Tensor(vae_stats["mean"]).to(self.device)
         self.vae_std = torch.Tensor(vae_stats["std"]).to(self.device)
 
-        t.print_stats()
+        #t.print_stats()
 
     def get_conditioning(self, prompts, *, zero_last_n_prompts: int):
         B = len(prompts)
-        print(f"Getting conditioning for {B} prompts")
         assert (
             0 <= zero_last_n_prompts <= B
         ), f"zero_last_n_prompts should be between 0 and {B}, got {zero_last_n_prompts}"
@@ -198,8 +211,6 @@ class T2VSynthMochiModel:
                 caption_input_ids_t5, caption_attention_mask_t5
             ).last_hidden_state.detach().to(torch.float32)
         )
-        print(y_feat.shape)
-        print(y_feat[0])
         self.t5_enc.to("cpu")
         # Sometimes returns a tensor, othertimes a tuple, not sure why
         # See: https://huggingface.co/genmo/mochi-1-preview/discussions/3
@@ -298,13 +309,13 @@ class T2VSynthMochiModel:
         # print(type(sample["y_feat"]))
         # print(sample["y_feat"][0].shape)
 
-        print(sample_null["y_mask"])
-        print(type(sample_null["y_mask"]))
-        print(sample_null["y_mask"][0].shape)
+        # print(sample_null["y_mask"])
+        # print(type(sample_null["y_mask"]))
+        # print(sample_null["y_mask"][0].shape)
 
-        print(sample_null["y_feat"])
-        print(type(sample_null["y_feat"]))
-        print(sample_null["y_feat"][0].shape)
+        # print(sample_null["y_feat"])
+        # print(type(sample_null["y_feat"]))
+        # print(sample_null["y_feat"][0].shape)
 
         sample["packed_indices"] = self.get_packed_indices(
             sample["y_mask"], **latent_dims
@@ -359,5 +370,5 @@ class T2VSynthMochiModel:
         self.dit.to("cpu")
     
         samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
-        print("samples", samples.shape, samples.dtype, samples.device)
+        print("samples: ", samples.shape, samples.dtype, samples.device)
         return samples
