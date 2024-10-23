@@ -11,6 +11,14 @@ Not sure if this can be worked around, I compiled a wheel for my Windows setup (
 
 https://huggingface.co/Kijai/Mochi_preview_comfy/blob/main/flash_attn-2.6.3-cp312-torch250cu125-win_amd64.whl
 
+Python 3.10 / CUDA 12.4 / Torch 2.4.1:
+
+https://huggingface.co/Kijai/Mochi_preview_comfy/blob/main/flash_attn-2.6.3-cp310-cp310-win_amd64.whl
+
+Other sources for pre-compiled wheels:
+
+https://github.com/oobabooga/flash-attention/releases
+
 Depending on frame count can fit under 20GB, VAE decoding is heavy and there is experimental tiled decoder (taken from CogVideoX -diffusers code) which allows higher frame counts, so far highest I've done is 97 with the default tile size 2x2 grid.
 
 Models:
