@@ -1,4 +1,4 @@
-# ComfyUI wrapper nodes for Mochi video gen: https://github.com/genmoai/models
+# ComfyUI wrapper nodes for [Mochi](https://github.com/genmoai/models) video generator
 
 
 # WORK IN PROGRESS
