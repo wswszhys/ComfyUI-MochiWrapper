@@ -9,7 +9,7 @@ https://github.com/user-attachments/assets/a714b70f-dcdb-4f91-8a3d-8da679a28d6e
 ## Requires flash_attn !
 Not sure if this can be worked around, I compiled a wheel for my Windows setup (Python 3.12, torch 2.5.0+cu124) that worked for me:
 
-https://huggingface.co/Kijai/Mochi_preview_comfy/blob/main/flash_attn-2.6.3-cp312-torch250cu125-win_amd64.whl
+https://huggingface.co/Kijai/Mochi_preview_comfy/blob/main/flash_attn-2.6.3-cp312-cp312-win_amd64.whl
 
 Python 3.10 / CUDA 12.4 / Torch 2.4.1:
 
