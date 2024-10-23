@@ -3,6 +3,9 @@
 
 # WORK IN PROGRESS
 
+https://github.com/user-attachments/assets/a714b70f-dcdb-4f91-8a3d-8da679a28d6e
+
+
 ## Requires flash_attn !
 Not sure if this can be worked around, I compiled a wheel for my Windows setup (Python 3.12, torch 2.5.0+cu124) that worked for me:
 
