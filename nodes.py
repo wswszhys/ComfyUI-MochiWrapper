@@ -102,7 +102,7 @@ class DownloadAndLoadMochiModel:
             snapshot_download(
                 repo_id=repo_id,
                 allow_patterns=[f"*{vae}*"],
-                local_dir=model_download_path,
+                local_dir=vae_download_path,
                 local_dir_use_symlinks=False,
             )
 
