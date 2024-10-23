@@ -107,6 +107,7 @@ class T2VSynthMochiModel:
         device_id: int,
         vae_stats_path: str,
         dit_checkpoint_path: str,
+        weight_dtype: torch.dtype = torch.float8_e4m3fn,
     ):
         super().__init__()
         t = Timer()
@@ -146,7 +147,7 @@ class T2VSynthMochiModel:
         for name, param in self.dit.named_parameters():
             params_to_keep = {"t_embedder", "x_embedder", "pos_frequencies", "t5", "norm"}
             if not any(keyword in name for keyword in params_to_keep):
-                param.data = param.data.to(torch.float8_e4m3fn)
+                param.data = param.data.to(weight_dtype)
             else:
                 param.data = param.data.to(torch.bfloat16)
         

@@ -47,7 +47,7 @@ class DownloadAndLoadMochiModel:
                     ],
                 ),
                  "precision": (["fp8_e4m3fn","fp16", "fp32", "bf16"],
-                    {"default": "bf16", "tooltip": "official recommendation is that 2b model should be fp16, 5b model should be bf16"}
+                    {"default": "fp8_e4m3fn", }
                 ),
             },
         }
@@ -99,6 +99,7 @@ class DownloadAndLoadMochiModel:
             device_id=0,
             vae_stats_path=os.path.join(script_directory, "configs", "vae_stats.json"),
             dit_checkpoint_path=model_path,
+            weight_dtype=dtype,
         )
         vae = Decoder(
                 out_channels=3,
