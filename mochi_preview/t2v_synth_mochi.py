@@ -211,8 +211,7 @@ class T2VSynthMochiModel:
                 if isinstance(sample[key], torch.Tensor):
                     sample[key] = sample[key].to(self.device, non_blocking=True)
 
-    @torch.inference_mode(mode=True)
-    def run(self, args, stream_results):
+    def run(self, args):
         torch.manual_seed(args["seed"])
         torch.cuda.manual_seed(args["seed"])
 

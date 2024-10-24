@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from torch.nn.attention import sdpa_kernel
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 from .context_parallel import all_to_all_collect_tokens, all_to_all_collect_heads, all_gather, get_cp_rank_size, is_cp_active
 from .layers import (
@@ -44,6 +44,12 @@ except ImportError:
 
 COMPILE_FINAL_LAYER = False #os.environ.get("COMPILE_DIT") == "1"
 COMPILE_MMDIT_BLOCK = False #os.environ.get("COMPILE_DIT") == "1"
+
+backends = []
+if torch.cuda.get_device_properties(0).major < 7:
+    backends.append(SDPBackend.MATH)
+else:
+    backends.append(SDPBackend.EFFICIENT_ATTENTION)
 
 
 class AsymmetricAttention(nn.Module):
@@ -180,15 +186,16 @@ class AsymmetricAttention(nn.Module):
     def sdpa_attention(self, qkv):
         q, k, v = rearrange(qkv, '(b s) t h d -> t b h s d', b=1)
         with torch.autocast("cuda", enabled=False):
-            out = F.scaled_dot_product_attention(
-                q, 
-                k, 
-                v, 
-                attn_mask=None, 
-                dropout_p=0.0, 
-                is_causal=False
-                )
-            return rearrange(out, 'b h s d -> s (b h d)')
+            with sdpa_kernel(backends):
+                out = F.scaled_dot_product_attention(
+                    q, 
+                    k, 
+                    v, 
+                    attn_mask=None, 
+                    dropout_p=0.0, 
+                    is_causal=False
+                    )
+                return rearrange(out, 'b h s d -> s (b h d)')
         
     def sage_attention(self, qkv):
         q, k, v = rearrange(qkv, '(b s) t h d -> t b h s d', b=1)
@@ -202,6 +209,19 @@ class AsymmetricAttention(nn.Module):
                 is_causal=False
                 )
             return rearrange(out, 'b h s d -> s (b h d)')
+        
+    def comfy_attention(self, qkv):
+        from comfy.ldm.modules.attention import optimized_attention
+        q, k, v = rearrange(qkv, '(b s) t h d -> t b h s d', b=1)
+        with torch.autocast("cuda", enabled=False):
+            out = optimized_attention(
+                q, 
+                k, 
+                v, 
+                heads = self.num_heads,
+                skip_reshape=True
+                )
+            return out.squeeze(0)
 
     @torch.compiler.disable()
     def run_attention(
@@ -228,6 +248,8 @@ class AsymmetricAttention(nn.Module):
             out = self.sdpa_attention(qkv)
         elif self.attention_mode == "sage_attn":
             out = self.sage_attention(qkv)
+        elif self.attention_mode == "comfy":
+            out = self.comfy_attention(qkv)
         
         x, y = pad_and_split_xy(out, valid_token_indices, B, N, L, qkv.dtype)
         assert x.size() == (B, N, local_dim)
@@ -642,7 +664,7 @@ class AsymmDiTJoint(nn.Module):
 
         # Use EFFICIENT_ATTENTION backend for T5 pooling, since we have a mask.
         # Have to call sdpa_kernel outside of a torch.compile region.
-        with sdpa_kernel(torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION):
+        with sdpa_kernel(backends):
             x, c, y_feat, rope_cos, rope_sin = self.prepare(
                 x, sigma, y_feat[0], y_mask[0]
             )

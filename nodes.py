@@ -61,7 +61,7 @@ class DownloadAndLoadMochiModel:
                 ),
                  "precision": (["fp8_e4m3fn","fp8_e4m3fn_fast","fp16", "fp32", "bf16"],
                     {"default": "fp8_e4m3fn", }),
-                "attention_mode": (["sdpa","flash_attn","sage_attn"],
+                "attention_mode": (["sdpa","flash_attn","sage_attn", "comfy"],
                 ),
             },
         }
@@ -167,7 +167,7 @@ class MochiTextEncode:
         max_tokens = 256
         load_device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
-        #print(clip.tokenizer.t5xxl)
+
         clip.tokenizer.t5xxl.pad_to_max_length = True
         clip.tokenizer.t5xxl.max_length = max_tokens
         clip.cond_stage_model.t5xxl.return_attention_masks = True
@@ -176,8 +176,10 @@ class MochiTextEncode:
         clip.cond_stage_model.to(load_device)
         tokens = clip.tokenizer.t5xxl.tokenize_with_weights(prompt, return_word_ids=True)
         
-        embeds, _, attention_mask = clip.cond_stage_model.t5xxl.encode_token_weights(tokens)
-
+        try:
+            embeds, _, attention_mask = clip.cond_stage_model.t5xxl.encode_token_weights(tokens)
+        except:
+            NotImplementedError("Failed to get attention mask from T5, is your ComfyUI up to date?")
 
         if embeds.shape[1] > 256:
             raise ValueError(f"Prompt is too long, max tokens supported is {max_tokens} or less, got {embeds.shape[1]}")
@@ -234,7 +236,7 @@ class MochiSampler:
             "negative_embeds": negative,
             "seed": seed,
         }
-        latents = model.run(args, stream_results=False)
+        latents = model.run(args)
     
         mm.soft_empty_cache()
 
@@ -265,6 +267,7 @@ class MochiDecode:
                tile_overlap_factor_width, auto_tile_size, frame_batch_size):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+        intermediate_device = mm.intermediate_device()
         samples = samples["samples"]
         samples = samples.to(torch.bfloat16).to(device)
 
@@ -347,23 +350,23 @@ class MochiDecode:
         vae.to(device)
         with torch.autocast(mm.get_autocast_device(device), dtype=torch.bfloat16):
             if enable_vae_tiling and frame_batch_size > T:
-                logging.warning(f"Frame batch size is larger than the number of samples ({T}), disabling tiling")
-                samples = vae(samples)
+                logging.warning(f"Frame batch size is larger than the number of samples, setting to {T}")
+                frame_batch_size = T
+                frames = decode_tiled(samples)
             elif not enable_vae_tiling:
                 logging.warning("Attempting to decode without tiling, very memory intensive")
-                samples = vae(samples)
+                frames = vae(samples)
             else:
                 logging.info("Decoding with tiling")
-                samples = decode_tiled(samples)
+                frames = decode_tiled(samples)
                 
         vae.to(offload_device)
 
-        samples = samples.float()
-        samples = (samples + 1.0) / 2.0
-        samples.clamp_(0.0, 1.0)
+        frames = frames.float()
+        frames = (frames + 1.0) / 2.0
+        frames.clamp_(0.0, 1.0)
 
-        frames = rearrange(samples, "b c t h w -> (t b) h w c").cpu().float()
-        #print(frames.shape)
+        frames = rearrange(frames, "b c t h w -> (t b) h w c").to(intermediate_device)
 
         return (frames,)
 
