@@ -46,8 +46,10 @@ COMPILE_FINAL_LAYER = False #os.environ.get("COMPILE_DIT") == "1"
 COMPILE_MMDIT_BLOCK = False #os.environ.get("COMPILE_DIT") == "1"
 
 backends = []
-if torch.cuda.get_device_properties(0).major < 7:
+if torch.cuda.get_device_properties(0).major <= 7.5:
     backends.append(SDPBackend.MATH)
+if torch.cuda.get_device_properties(0).major >= 9.0:
+    backends.append(SDPBackend.CUDNN_ATTENTION)
 else:
     backends.append(SDPBackend.EFFICIENT_ATTENTION)
 
