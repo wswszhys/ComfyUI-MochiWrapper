@@ -49,7 +49,7 @@ class DownloadAndLoadMochiModel:
                     [   
                         "mochi_preview_dit_fp8_e4m3fn.safetensors",
                         "mochi_preview_dit_bf16.safetensors",
-                        "mochi_preview_dit_GGUF_Q4_0_v1.safetensors"
+                        "mochi_preview_dit_GGUF_Q4_0_v2.safetensors"
 
                     ],
                     {"tooltip": "Downloads from 'https://huggingface.co/Kijai/Mochi_preview_comfy' to 'models/diffusion_models/mochi'", },
