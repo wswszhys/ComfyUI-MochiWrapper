@@ -65,6 +65,9 @@ class DownloadAndLoadMochiModel:
                 "attention_mode": (["sdpa","flash_attn","sage_attn", "comfy"],
                 ),
             },
+            "optional": {
+                "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
+            },
         }
 
     RETURN_TYPES = ("MOCHIMODEL", "MOCHIVAE",)
@@ -73,7 +76,7 @@ class DownloadAndLoadMochiModel:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "Downloads and loads the selected Mochi model from Huggingface"
 
-    def loadmodel(self, model, vae, precision, attention_mode):
+    def loadmodel(self, model, vae, precision, attention_mode, trigger=None):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -159,8 +162,8 @@ class MochiTextEncode:
             }
         }
 
-    RETURN_TYPES = ("CONDITIONING",)
-    RETURN_NAMES = ("conditioning",)
+    RETURN_TYPES = ("CONDITIONING", "CLIP",)
+    RETURN_NAMES = ("conditioning", "clip", )
     FUNCTION = "process"
     CATEGORY = "MochiWrapper"
 
@@ -192,7 +195,7 @@ class MochiTextEncode:
             "embeds": embeds,
             "attention_mask": attention_mask["attention_mask"].bool(),
         }
-        return (t5_embeds, )
+        return (t5_embeds, clip,)
     
 
 class MochiSampler:
