@@ -4,6 +4,7 @@ from typing import Dict, List
 import torch
 import torch.nn.functional as F
 import torch.utils.data
+from einops import rearrange, repeat
 
 from .dit.joint_model.context_parallel import get_cp_rank_size
 from tqdm import tqdm
@@ -125,7 +126,13 @@ class T2VSynthMochiModel:
         params_to_keep = {"t_embedder", "x_embedder", "pos_frequencies", "t5", "norm"}
         print(f"Loading model state_dict from {dit_checkpoint_path}...")
         dit_sd = load_torch_file(dit_checkpoint_path)
-        if is_accelerate_available:
+        if "gguf" in dit_checkpoint_path.lower():
+            from .. import mz_gguf_loader
+            import importlib
+            importlib.reload(mz_gguf_loader)
+            with mz_gguf_loader.quantize_lazy_load():
+                model = mz_gguf_loader.quantize_load_state_dict(model, dit_sd, device="cpu")
+        elif is_accelerate_available:
             print("Using accelerate to load and assign model weights to device...")
             for name, param in model.named_parameters():
                 if not any(keyword in name for keyword in params_to_keep):
@@ -261,43 +268,59 @@ class T2VSynthMochiModel:
             dtype=torch.float32,
         )
 
-        # if batch_cfg:
-        #     sample_batched["packed_indices"] = self.get_packed_indices(
-        #         sample_batched["y_mask"], **latent_dims
-        #     )
-        #     z = repeat(z, "b ... -> (repeat b) ...", repeat=2)
-        # else:
-
-        sample = {
+        if batch_cfg: #WIP
+            pos_embeds = args["positive_embeds"]["embeds"].to(self.device)
+            neg_embeds = args["negative_embeds"]["embeds"].to(self.device)
+            pos_attention_mask = args["positive_embeds"]["attention_mask"].to(self.device)
+            neg_attention_mask = args["negative_embeds"]["attention_mask"].to(self.device)
+            print(neg_embeds.shape)
+            y_feat = torch.cat((pos_embeds, neg_embeds))
+            y_mask = torch.cat((pos_attention_mask, neg_attention_mask))
+            zero_last_n_prompts = B# if neg_prompt == "" else 0
+            y_feat[-zero_last_n_prompts:] = 0
+            y_mask[-zero_last_n_prompts:] = False
+   
+            sample_batched = {
+                "y_mask": [y_mask],
+                "y_feat": [y_feat]
+            }
+            sample_batched["packed_indices"] = self.get_packed_indices(
+                sample_batched["y_mask"], **latent_dims
+            )
+            z = repeat(z, "b ... -> (repeat b) ...", repeat=2)
+            print("sample_batched y_mask",sample_batched["y_mask"])
+            print("y_mask type",type(sample_batched["y_mask"])) #<class 'list'>"
+            print("ymask 0 shape",sample_batched["y_mask"][0].shape)#torch.Size([2, 256])
+        else:
+            sample = {
             "y_mask": [args["positive_embeds"]["attention_mask"].to(self.device)],
             "y_feat": [args["positive_embeds"]["embeds"].to(self.device)]
-        }
-        sample_null = {
-            "y_mask": [args["negative_embeds"]["attention_mask"].to(self.device)],
-            "y_feat": [args["negative_embeds"]["embeds"].to(self.device)]
-        }
+            }
+            sample_null = {
+                "y_mask": [args["negative_embeds"]["attention_mask"].to(self.device)],
+                "y_feat": [args["negative_embeds"]["embeds"].to(self.device)]
+            }
 
-        sample["packed_indices"] = self.get_packed_indices(
-            sample["y_mask"], **latent_dims
-        )
-        sample_null["packed_indices"] = self.get_packed_indices(
-            sample_null["y_mask"], **latent_dims
-        )
+            sample["packed_indices"] = self.get_packed_indices(
+                sample["y_mask"], **latent_dims
+            )
+            sample_null["packed_indices"] = self.get_packed_indices(
+                sample_null["y_mask"], **latent_dims
+            )
 
         def model_fn(*, z, sigma, cfg_scale):
             self.dit.to(self.device)
-            # if batch_cfg:
-            #     with torch.autocast("cuda", dtype=torch.bfloat16):
-            #         out = self.dit(z, sigma, **sample_batched)
-            #     out_cond, out_uncond = torch.chunk(out, chunks=2, dim=0)
-            #else:
+            if batch_cfg:
+                with torch.autocast(mm.get_autocast_device(self.device), dtype=torch.bfloat16):
+                    out = self.dit(z, sigma, **sample_batched)
+                out_cond, out_uncond = torch.chunk(out, chunks=2, dim=0)
+            else:
+                nonlocal sample, sample_null
+                with torch.autocast(mm.get_autocast_device(self.device), dtype=torch.bfloat16):
+                    out_cond = self.dit(z, sigma, **sample)
+                    out_uncond = self.dit(z, sigma, **sample_null)
 
-            nonlocal sample, sample_null
-            with torch.autocast(mm.get_autocast_device(self.device), dtype=torch.bfloat16):
-                out_cond = self.dit(z, sigma, **sample)
-                out_uncond = self.dit(z, sigma, **sample_null)
             assert out_cond.shape == out_uncond.shape
-
             return out_uncond + cfg_scale * (out_cond - out_uncond), out_cond
         
         comfy_pbar = ProgressBar(sample_steps)

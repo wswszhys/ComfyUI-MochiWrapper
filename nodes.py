@@ -49,6 +49,7 @@ class DownloadAndLoadMochiModel:
                     [   
                         "mochi_preview_dit_fp8_e4m3fn.safetensors",
                         "mochi_preview_dit_bf16.safetensors",
+                        "mochi_preview_dit_GGUF_Q4_0_v1.safetensors"
 
                     ],
                     {"tooltip": "Downloads from 'https://huggingface.co/Kijai/Mochi_preview_comfy' to 'models/diffusion_models/mochi'", },
@@ -208,6 +209,7 @@ class MochiSampler:
                 "steps": ("INT", {"default": 50, "min": 2}),
                 "cfg": ("FLOAT", {"default": 4.5, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                #"batch_cfg": ("BOOLEAN", {"default": False, "tooltip": "Enable batched cfg"}),
             },
         }
 
