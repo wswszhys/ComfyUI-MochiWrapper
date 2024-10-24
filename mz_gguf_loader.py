@@ -26,7 +26,7 @@ def quantize_load_state_dict(model, state_dict, device="cpu"):
 
     for name, module in model.named_modules():
         if name in Q4_0_qkey:
-            print(name)
+            #print(name)
             q_linear = WQLinear_GGUF.from_linear(
                 linear=module,
                 device=device,
