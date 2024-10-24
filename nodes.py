@@ -248,7 +248,7 @@ class MochiDecode:
             "samples": ("LATENT", ),
             "enable_vae_tiling": ("BOOLEAN", {"default": False, "tooltip": "Drastically reduces memory use but may introduce seams"}),
             "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Auto size based on height and width, default is half the size"}),
-            "frame_batch_size": ("INT", {"default": 6, "min": 1, "max": 64, "step": 1}),
+            "frame_batch_size": ("INT", {"default": 6, "min": 1, "max": 64, "step": 1, "tooltip": "Number of frames in latent space (downscale factor is 6) to decode at once"}),
             "tile_sample_min_height": ("INT", {"default": 240, "min": 16, "max": 2048, "step": 8, "tooltip": "Minimum tile height, default is half the height"}),
             "tile_sample_min_width": ("INT", {"default": 424, "min": 16, "max": 2048, "step": 8, "tooltip": "Minimum tile width, default is half the width"}),
             "tile_overlap_factor_height": ("FLOAT", {"default": 0.1666, "min": 0.0, "max": 1.0, "step": 0.001}),
@@ -268,6 +268,17 @@ class MochiDecode:
         samples = samples["samples"]
         samples = samples.to(torch.bfloat16).to(device)
 
+        B, C, T, H, W = samples.shape
+
+        self.tile_overlap_factor_height = tile_overlap_factor_height if not auto_tile_size else 1 / 6
+        self.tile_overlap_factor_width = tile_overlap_factor_width if not auto_tile_size else 1 / 5
+
+        self.tile_sample_min_height = tile_sample_min_height if not auto_tile_size else H // 2 * 8
+        self.tile_sample_min_width = tile_sample_min_width if not auto_tile_size else W // 2 * 8
+
+        self.tile_latent_min_height = int(self.tile_sample_min_height / 8)
+        self.tile_latent_min_width = int(self.tile_sample_min_width / 8)
+
         
         def blend_v(a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
             blend_extent = min(a.shape[3], b.shape[3], blend_extent)
@@ -284,70 +295,68 @@ class MochiDecode:
                     x / blend_extent
                 )
             return b
+        
+        def decode_tiled(samples):
+            overlap_height = int(self.tile_latent_min_height * (1 - self.tile_overlap_factor_height))
+            overlap_width = int(self.tile_latent_min_width * (1 - self.tile_overlap_factor_width))
+            blend_extent_height = int(self.tile_sample_min_height * self.tile_overlap_factor_height)
+            blend_extent_width = int(self.tile_sample_min_width * self.tile_overlap_factor_width)
+            row_limit_height = self.tile_sample_min_height - blend_extent_height
+            row_limit_width = self.tile_sample_min_width - blend_extent_width
 
-        self.tile_overlap_factor_height = tile_overlap_factor_height if not auto_tile_size else 1 / 6
-        self.tile_overlap_factor_width = tile_overlap_factor_width if not auto_tile_size else 1 / 5
+            # Split z into overlapping tiles and decode them separately.
+            # The tiles have an overlap to avoid seams between tiles.
+            comfy_pbar = ProgressBar(len(range(0, H, overlap_height)))
+            rows = []
+            for i in tqdm(range(0, H, overlap_height), desc="Processing rows"):
+                row = []
+                for j in tqdm(range(0, W, overlap_width), desc="Processing columns", leave=False):
+                    time = []
+                    for k in tqdm(range(T // frame_batch_size), desc="Processing frames", leave=False):
+                        remaining_frames = T % frame_batch_size
+                        start_frame = frame_batch_size * k + (0 if k == 0 else remaining_frames)
+                        end_frame = frame_batch_size * (k + 1) + remaining_frames
+                        tile = samples[
+                            :,
+                            :,
+                            start_frame:end_frame,
+                            i : i + self.tile_latent_min_height,
+                            j : j + self.tile_latent_min_width,
+                        ]
+                        tile = vae(tile)
+                        time.append(tile)
+                    row.append(torch.cat(time, dim=2))
+                rows.append(row)
+                comfy_pbar.update(1)
 
-        self.tile_sample_min_height = tile_sample_min_height if not auto_tile_size else samples.shape[3] // 2 * 8
-        self.tile_sample_min_width = tile_sample_min_width if not auto_tile_size else samples.shape[4] // 2 * 8
+            result_rows = []
+            for i, row in enumerate(tqdm(rows, desc="Blending rows")):
+                result_row = []
+                for j, tile in enumerate(tqdm(row, desc="Blending tiles", leave=False)):
+                    # blend the above tile and the left tile
+                    # to the current tile and add the current tile to the result row
+                    if i > 0:
+                        tile = blend_v(rows[i - 1][j], tile, blend_extent_height)
+                    if j > 0:
+                        tile = blend_h(row[j - 1], tile, blend_extent_width)
+                    result_row.append(tile[:, :, :, :row_limit_height, :row_limit_width])
+                result_rows.append(torch.cat(result_row, dim=4))
 
-        self.tile_latent_min_height = int(self.tile_sample_min_height / 8)
-        self.tile_latent_min_width = int(self.tile_sample_min_width / 8)
+            return torch.cat(result_rows, dim=3)
         
         vae.to(device)
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            if not enable_vae_tiling:
+        with torch.autocast(mm.get_autocast_device(device), dtype=torch.bfloat16):
+            if enable_vae_tiling and frame_batch_size > T:
+                logging.warning(f"Frame batch size is larger than the number of samples ({T}), disabling tiling")
+                samples = vae(samples)
+            elif not enable_vae_tiling:
+                logging.warning("Attempting to decode without tiling, very memory intensive")
                 samples = vae(samples)
             else:
-                batch_size, num_channels, num_frames, height, width = samples.shape
-                overlap_height = int(self.tile_latent_min_height * (1 - self.tile_overlap_factor_height))
-                overlap_width = int(self.tile_latent_min_width * (1 - self.tile_overlap_factor_width))
-                blend_extent_height = int(self.tile_sample_min_height * self.tile_overlap_factor_height)
-                blend_extent_width = int(self.tile_sample_min_width * self.tile_overlap_factor_width)
-                row_limit_height = self.tile_sample_min_height - blend_extent_height
-                row_limit_width = self.tile_sample_min_width - blend_extent_width
-
-                # Split z into overlapping tiles and decode them separately.
-                # The tiles have an overlap to avoid seams between tiles.
-                comfy_pbar = ProgressBar(len(range(0, height, overlap_height)))
-                rows = []
-                for i in tqdm(range(0, height, overlap_height), desc="Processing rows"):
-                    row = []
-                    for j in tqdm(range(0, width, overlap_width), desc="Processing columns", leave=False):
-                        time = []
-                        for k in tqdm(range(num_frames // frame_batch_size), desc="Processing frames", leave=False):
-                            remaining_frames = num_frames % frame_batch_size
-                            start_frame = frame_batch_size * k + (0 if k == 0 else remaining_frames)
-                            end_frame = frame_batch_size * (k + 1) + remaining_frames
-                            tile = samples[
-                                :,
-                                :,
-                                start_frame:end_frame,
-                                i : i + self.tile_latent_min_height,
-                                j : j + self.tile_latent_min_width,
-                            ]
-                            tile = vae(tile)
-                            time.append(tile)
-                        row.append(torch.cat(time, dim=2))
-                    rows.append(row)
-                    comfy_pbar.update(1)
-
-                result_rows = []
-                for i, row in enumerate(tqdm(rows, desc="Blending rows")):
-                    result_row = []
-                    for j, tile in enumerate(tqdm(row, desc="Blending tiles", leave=False)):
-                        # blend the above tile and the left tile
-                        # to the current tile and add the current tile to the result row
-                        if i > 0:
-                            tile = blend_v(rows[i - 1][j], tile, blend_extent_height)
-                        if j > 0:
-                            tile = blend_h(row[j - 1], tile, blend_extent_width)
-                        result_row.append(tile[:, :, :, :row_limit_height, :row_limit_width])
-                    result_rows.append(torch.cat(result_row, dim=4))
-
-                samples = torch.cat(result_rows, dim=3)
+                logging.info("Decoding with tiling")
+                samples = decode_tiled(samples)
+                
         vae.to(offload_device)
-        #print("samples", samples.shape, samples.dtype, samples.device)
 
         samples = samples.float()
         samples = (samples + 1.0) / 2.0

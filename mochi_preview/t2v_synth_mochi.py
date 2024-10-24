@@ -1,17 +1,14 @@
 import json
-import random
 from typing import Dict, List
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data
-from torch import nn
 
 from .dit.joint_model.context_parallel import get_cp_rank_size
 from tqdm import tqdm
 from comfy.utils import ProgressBar, load_torch_file
+import comfy.model_management as mm 
 
 from contextlib import nullcontext
 try:
@@ -85,29 +82,6 @@ def compute_packed_indices(
         "max_seqlen_in_batch_kv": max_seqlen_in_batch,
         "valid_token_indices_kv": valid_token_indices,
     }
-
-
-def shift_sigma(
-    sigma: np.ndarray,
-    shift: float,
-):
-    """Shift noise standard deviation toward higher values.
-
-    Useful for training a model at high resolutions,
-    or sampling more finely at high noise levels.
-
-    Equivalent to:
-        sigma_shift = shift / (shift + 1 / sigma - 1)
-    except for sigma = 0.
-
-    Args:
-        sigma: noise standard deviation in [0, 1]
-        shift: shift factor >= 1.
-               For shift > 1, shifts sigma to higher values.
-               For shift = 1, identity function.
-    """
-    return shift * sigma / (shift * sigma + 1 - sigma)
-
 
 class T2VSynthMochiModel:
     def __init__(
@@ -239,23 +213,16 @@ class T2VSynthMochiModel:
 
     @torch.inference_mode(mode=True)
     def run(self, args, stream_results):
-        random.seed(args["seed"])
-        np.random.seed(args["seed"])
         torch.manual_seed(args["seed"])
+        torch.cuda.manual_seed(args["seed"])
 
         generator = torch.Generator(device=self.device)
         generator.manual_seed(args["seed"])
 
-        # assert (
-        #     len(args["prompt"]) == 1
-        # ), f"Expected exactly one prompt, got {len(args['prompt'])}"
-        #prompt = args["prompt"][0]
-        #neg_prompt = args["negative_prompt"][0] if len(args["negative_prompt"]) else ""
-        B = 1
-
-        w = args["width"]
-        h = args["height"]
-        t = args["num_frames"]
+        num_frames = args["num_frames"]
+        height = args["height"]
+        width = args["width"]
+        
         batch_cfg = args["mochi_args"]["batch_cfg"]
         sample_steps = args["mochi_args"]["num_inference_steps"]
         cfg_schedule = args["mochi_args"].get("cfg_schedule")
@@ -267,7 +234,7 @@ class T2VSynthMochiModel:
             assert (
                 len(sigma_schedule) == sample_steps + 1
             ), f"sigma_schedule must have length {sample_steps + 1}, got {len(sigma_schedule)}"
-        assert (t - 1) % 6 == 0, f"t - 1 must be divisible by 6, got {t - 1}"
+        assert (num_frames - 1) % 6 == 0, f"t - 1 must be divisible by 6, got {num_frames - 1}"
 
         # if batch_cfg:
         #     sample_batched = self.get_conditioning(
@@ -277,15 +244,19 @@ class T2VSynthMochiModel:
         #     sample = self.get_conditioning([prompt], zero_last_n_prompts=0)
         #     sample_null = self.get_conditioning([neg_prompt] * B, zero_last_n_prompts=B if neg_prompt == "" else 0)
 
+        # create z
         spatial_downsample = 8
         temporal_downsample = 6
-        latent_t = (t - 1) // temporal_downsample + 1
-        latent_w, latent_h = w // spatial_downsample, h // spatial_downsample
-
-        latent_dims = dict(lT=latent_t, lW=latent_w, lH=latent_h)
         in_channels = 12
+        B = 1
+        C = in_channels
+        T = (num_frames - 1) // temporal_downsample + 1
+        H = height // spatial_downsample
+        W = width // spatial_downsample
+        latent_dims = dict(lT=T, lW=W, lH=H)
+        
         z = torch.randn(
-            (B, in_channels, latent_t, latent_h, latent_w),
+            (B, C, T, H, W),
             device=self.device,
             generator=generator,
             dtype=torch.float32,
@@ -307,22 +278,6 @@ class T2VSynthMochiModel:
             "y_feat": [args["negative_embeds"]["embeds"].to(self.device)]
         }
 
-        # print(sample["y_mask"])
-        # print(type(sample["y_mask"]))
-        # print(sample["y_mask"][0].shape)
-
-        # print(sample["y_feat"])
-        # print(type(sample["y_feat"]))
-        # print(sample["y_feat"][0].shape)
-
-        # print(sample_null["y_mask"])
-        # print(type(sample_null["y_mask"]))
-        # print(sample_null["y_mask"][0].shape)
-
-        # print(sample_null["y_feat"])
-        # print(type(sample_null["y_feat"]))
-        # print(sample_null["y_feat"][0].shape)
-
         sample["packed_indices"] = self.get_packed_indices(
             sample["y_mask"], **latent_dims
         )
@@ -331,8 +286,6 @@ class T2VSynthMochiModel:
         )
 
         def model_fn(*, z, sigma, cfg_scale):
-            #print("z", z.dtype, z.device)
-            #print("sigma", sigma.dtype, sigma.device)
             self.dit.to(self.device)
             # if batch_cfg:
             #     with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -341,7 +294,7 @@ class T2VSynthMochiModel:
             #else:
 
             nonlocal sample, sample_null
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast(mm.get_autocast_device(self.device), dtype=torch.bfloat16):
                 out_cond = self.dit(z, sigma, **sample)
                 out_uncond = self.dit(z, sigma, **sample_null)
             assert out_cond.shape == out_uncond.shape
@@ -364,8 +317,6 @@ class T2VSynthMochiModel:
             pred = pred.to(z)
             output_cond = output_cond.to(z)
 
-            #if stream_results:
-            #    yield i / sample_steps, None, False
             z = z + dsigma * pred
             comfy_pbar.update(1)
 
