@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -98,7 +98,8 @@ class T2VSynthMochiModel:
         dit_checkpoint_path: str,
         weight_dtype: torch.dtype = torch.float8_e4m3fn,
         fp8_fastmode: bool = False,
-        attention_mode: str = "sdpa"
+        attention_mode: str = "sdpa",
+        compile_args: Optional[Dict] = None,
     ):
         super().__init__()
         self.device = device
@@ -157,8 +158,17 @@ class T2VSynthMochiModel:
             from ..fp8_optimization import convert_fp8_linear
             convert_fp8_linear(model, torch.bfloat16)
 
+        model = model.eval().to(self.device)
+
+        #torch.compile
+        if compile_args is not None:
+            if compile_args["compile_dit"]:
+                for i, block in enumerate(model.blocks):
+                    model.blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=False, backend=compile_args["backend"])
+            if compile_args["compile_final_layer"]:
+                model.final_layer = torch.compile(model.final_layer, fullgraph=compile_args["fullgraph"], dynamic=False, backend=compile_args["backend"])        
+
         self.dit = model
-        self.dit.eval()
         
         vae_stats = json.load(open(vae_stats_path))
         self.vae_mean = torch.Tensor(vae_stats["mean"]).to(self.device)

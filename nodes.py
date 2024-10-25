@@ -68,6 +68,7 @@ class DownloadAndLoadMochiModel:
             },
             "optional": {
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
+                "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
             },
         }
 
@@ -77,7 +78,7 @@ class DownloadAndLoadMochiModel:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "Downloads and loads the selected Mochi model from Huggingface"
 
-    def loadmodel(self, model, vae, precision, attention_mode, trigger=None):
+    def loadmodel(self, model, vae, precision, attention_mode, trigger=None, compile_args=None):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -121,7 +122,8 @@ class DownloadAndLoadMochiModel:
             dit_checkpoint_path=model_path,
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
-            attention_mode=attention_mode
+            attention_mode=attention_mode,
+            compile_args=compile_args
         )
         with (init_empty_weights() if is_accelerate_available else nullcontext()):
             vae = Decoder(
@@ -161,6 +163,7 @@ class MochiModelLoader:
             },
             "optional": {
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
+                "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
             },
         }
     RETURN_TYPES = ("MOCHIMODEL",)
@@ -168,7 +171,7 @@ class MochiModelLoader:
     FUNCTION = "loadmodel"
     CATEGORY = "MochiWrapper"
 
-    def loadmodel(self, model_name, precision, attention_mode, trigger=None):
+    def loadmodel(self, model_name, precision, attention_mode, trigger=None, compile_args=None):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -184,11 +187,42 @@ class MochiModelLoader:
             dit_checkpoint_path=model_path,
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
-            attention_mode=attention_mode
+            attention_mode=attention_mode,
+            compile_args=compile_args
         )
 
         return (model, )
 
+class MochiTorchCompileSettings:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": { 
+                "backend": (["inductor","cudagraph"], {"default": "inductor"}),
+                "fullgraph": ("BOOLEAN", {"default": False, "tooltip": "Enable full graph mode"}),
+                "mode": (["default", "max-autotune", "max-autotune-no-cudagraphs", "reduce-overhead"], {"default": "default"}),
+                "compile_dit": ("BOOLEAN", {"default": True, "tooltip": "Compiles all transformer blocks"}),
+                "compile_final_layer": ("BOOLEAN", {"default": True, "tooltip": "Enable compiling final layer."}),
+            },
+        }
+    RETURN_TYPES = ("MOCHICOMPILEARGS",)
+    RETURN_NAMES = ("torch_compile_args",)
+    FUNCTION = "loadmodel"
+    CATEGORY = "MochiWrapper"
+    DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
+
+    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer):
+
+        compile_args = {
+            "backend": backend,
+            "fullgraph": fullgraph,
+            "mode": mode,
+            "compile_dit": compile_dit,
+            "compile_final_layer": compile_final_layer,
+        }
+
+        return (compile_args, )
+    
 class MochiVAELoader:
     @classmethod
     def INPUT_TYPES(s):
@@ -522,7 +556,8 @@ NODE_CLASS_MAPPINGS = {
     "MochiTextEncode": MochiTextEncode,
     "MochiModelLoader": MochiModelLoader,
     "MochiVAELoader": MochiVAELoader,
-    "MochiDecodeSpatialTiling": MochiDecodeSpatialTiling
+    "MochiDecodeSpatialTiling": MochiDecodeSpatialTiling,
+    "MochiTorchCompileSettings": MochiTorchCompileSettings
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadAndLoadMochiModel": "(Down)load Mochi Model",
@@ -531,5 +566,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MochiTextEncode": "Mochi TextEncode",
     "MochiModelLoader": "Mochi Model Loader",
     "MochiVAELoader": "Mochi VAE Loader",
-    "MochiDecodeSpatialTiling": "Mochi VAE Decode Spatial Tiling"
+    "MochiDecodeSpatialTiling": "Mochi VAE Decode Spatial Tiling",
+    "MochiTorchCompileSettings": "Mochi Torch Compile Settings"
     }

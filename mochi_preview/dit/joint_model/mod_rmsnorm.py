@@ -18,6 +18,6 @@ class ModulatedRMSNorm(torch.autograd.Function):
 
         return x_modulated.type_as(x)
 
-
+@torch.compiler.disable()
 def modulated_rmsnorm(x, scale, eps=1e-6):
     return ModulatedRMSNorm.apply(x, scale, eps)

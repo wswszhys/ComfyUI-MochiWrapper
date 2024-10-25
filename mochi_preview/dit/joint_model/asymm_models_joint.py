@@ -42,9 +42,6 @@ try:
 except ImportError:
     SAGEATTN_IS_AVAILABLE = False
 
-COMPILE_FINAL_LAYER = False #os.environ.get("COMPILE_DIT") == "1"
-COMPILE_MMDIT_BLOCK = False #os.environ.get("COMPILE_DIT") == "1"
-
 backends = []
 if torch.cuda.get_device_properties(0).major <= 7.5:
     backends.append(SDPBackend.MATH)
@@ -317,7 +314,6 @@ class AsymmetricAttention(nn.Module):
         )
         return x, y
 
-#@torch.compile(disable=not COMPILE_MMDIT_BLOCK)
 class AsymmetricJointBlock(nn.Module):
     def __init__(
         self,
@@ -441,7 +437,6 @@ class AsymmetricJointBlock(nn.Module):
         return y
 
 
-#@torch.compile(disable=not COMPILE_FINAL_LAYER)
 class FinalLayer(nn.Module):
     """
     The final layer of DiT.
@@ -586,7 +581,6 @@ class AsymmDiTJoint(nn.Module):
         """
         return self.x_embedder(x)  # Convert BcTHW to BCN
 
-    #@torch.compile(disable=not COMPILE_MMDIT_BLOCK)
     def prepare(
         self,
         x: torch.Tensor,
