@@ -30,7 +30,7 @@ def fp8_linear_forward(cls, original_dtype, input):
 
             if isinstance(o, tuple):
                 o = o[0]
-                
+
             if tensor_2d:
                 return o.reshape(input.shape[0], -1)
 
@@ -38,7 +38,6 @@ def fp8_linear_forward(cls, original_dtype, input):
         else:
             cls.to(original_dtype)
             out = cls.original_forward(input.to(original_dtype))
-            cls.to(original_dtype)
             return out
     else:
         return cls.original_forward(input)
