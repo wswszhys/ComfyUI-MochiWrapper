@@ -198,7 +198,7 @@ class MochiTorchCompileSettings:
     def INPUT_TYPES(s):
         return {
             "required": { 
-                "backend": (["inductor","cudagraph"], {"default": "inductor"}),
+                "backend": (["inductor","cudagraphs"], {"default": "inductor"}),
                 "fullgraph": ("BOOLEAN", {"default": False, "tooltip": "Enable full graph mode"}),
                 "mode": (["default", "max-autotune", "max-autotune-no-cudagraphs", "reduce-overhead"], {"default": "default"}),
                 "compile_dit": ("BOOLEAN", {"default": True, "tooltip": "Compiles all transformer blocks"}),
