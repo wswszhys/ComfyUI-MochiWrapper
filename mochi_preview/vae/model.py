@@ -33,7 +33,7 @@ class SafeConv3d(torch.nn.Conv3d):
     NOTE: No support for padding along time dimension.
           Input must already be padded along time.
     """
-
+    @torch.compiler.disable()
     def forward(self, input):
         memory_count = torch.prod(torch.tensor(input.shape)).item() * 2 / 1024**3
         if memory_count > 2:
