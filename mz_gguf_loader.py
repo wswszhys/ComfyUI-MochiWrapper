@@ -52,8 +52,14 @@ def quantize_load_state_dict(model, state_dict, device="cpu", cublas_ops=False):
 
     model.to_empty(device=device)
     model.load_state_dict(state_dict, strict=False)
-    if linear_ops == cublas_half_matmul:
-        setattr(model, "cublas_half_matmul", True)
+    try:
+        if linear_ops == cublas_half_matmul:
+            setattr(model, "cublas_half_matmul", True)
+        else:
+            setattr(model, "cublas_half_matmul", False)
+    except:
+        setattr(model, "cublas_half_matmul", False)
+        pass
     return model
 
 

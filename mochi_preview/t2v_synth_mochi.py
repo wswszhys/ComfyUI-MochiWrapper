@@ -315,16 +315,17 @@ class T2VSynthMochiModel:
 
         def model_fn(*, z, sigma, cfg_scale):
             self.dit.to(self.device)
+            if hasattr(self.dit, "cublas_half_matmul") and self.dit.cublas_half_matmul:
+                autocast_dtype = torch.float16
+            else:
+                autocast_dtype = torch.bfloat16
             if batch_cfg:
-                with torch.autocast(mm.get_autocast_device(self.device), dtype=torch.bfloat16):
+                with torch.autocast(mm.get_autocast_device(self.device), dtype=autocast_dtype):
                     out = self.dit(z, sigma, **sample_batched)
                 out_cond, out_uncond = torch.chunk(out, chunks=2, dim=0)
             else:
                 nonlocal sample, sample_null
-                if hasattr(self.dit, "cublas_half_matmul") and self.dit.cublas_half_matmul:
-                    autocast_dtype = torch.float16
-                else:
-                    autocast_dtype = torch.bfloat16
+               
                 with torch.autocast(mm.get_autocast_device(self.device), dtype=autocast_dtype):
                     out_cond = self.dit(z, sigma, **sample)
                     out_uncond = self.dit(z, sigma, **sample_null)
