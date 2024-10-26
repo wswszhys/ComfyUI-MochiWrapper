@@ -15,6 +15,7 @@ from .layers import (
     RMSNorm,
     TimestepEmbedder,
 )
+
 from .mod_rmsnorm import modulated_rmsnorm
 from .residual_tanh_gated_rmsnorm import (
     residual_tanh_gated_rmsnorm,
@@ -140,7 +141,7 @@ class AsymmetricAttention(nn.Module):
 
         # Process visual features
         qkv_x = self.qkv_x(x)  # (B, M, 3 * dim_x)
-        assert qkv_x.dtype == torch.bfloat16
+        #assert qkv_x.dtype == torch.bfloat16
         qkv_x = all_to_all_collect_tokens(
             qkv_x, self.num_heads
         )  # (3, B, N, local_h, head_dim)

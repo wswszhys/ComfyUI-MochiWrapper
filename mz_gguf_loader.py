@@ -2,7 +2,8 @@
 
 import torch
 import torch.nn as nn
-import gc
+import torch.nn.functional as F
+
 
 
 class quantize_lazy_load():
@@ -18,7 +19,17 @@ class quantize_lazy_load():
         self.device.__exit__(exc_type, exc_value, traceback)
 
 
-def quantize_load_state_dict(model, state_dict, device="cpu"):
+def quantize_load_state_dict(model, state_dict, device="cpu", cublas_ops=False):
+    if cublas_ops:
+        try:
+            from cublas_ops import cublas_half_matmul
+            linear_ops = cublas_half_matmul
+            print("Using cublas_ops")
+        except:
+            raise ImportError("Install cublas_ops (https://github.com/aredden/torch-cublas-hgemm) to use cublas_ops")
+    else:
+        linear_ops = F.linear
+        pass
     quant_keys = []
     for key in state_dict.keys():
         if key.endswith(".Q4_0_qweight"):
@@ -35,12 +46,14 @@ def quantize_load_state_dict(model, state_dict, device="cpu"):
                 linear=module,
                 device=device,
                 qtype=qtype,
+                linear_ops=linear_ops
             )
             set_op_by_name(model, name, q_linear)
 
     model.to_empty(device=device)
     model.load_state_dict(state_dict, strict=False)
-    model.to(device)
+    if linear_ops == cublas_half_matmul:
+        setattr(model, "cublas_half_matmul", True)
     return model
 
 
@@ -57,19 +70,16 @@ def set_op_by_name(layer, name, new_module):
     else:
         setattr(layer, name, new_module)
 
-
-import torch.nn.functional as F
-
-
 class WQLinear_GGUF(nn.Module):
     def __init__(
-        self, in_features, out_features, bias, dev, qtype="Q4_0"
+        self, in_features, out_features, bias, dev, qtype, linear_ops
     ):
         super().__init__()
 
         self.in_features = in_features
         self.out_features = out_features
         self.qtype = qtype
+        self.linear_ops = linear_ops
 
         qweight_shape = quant_shape_to_byte_shape(
             (out_features, in_features), qtype
@@ -99,6 +109,7 @@ class WQLinear_GGUF(nn.Module):
         cls, linear,
         device="cpu",
         qtype="Q4_0",
+        linear_ops=F.linear
     ):
         q_linear = cls(
             linear.in_features,
@@ -106,6 +117,7 @@ class WQLinear_GGUF(nn.Module):
             linear.bias is not None,
             device,
             qtype=qtype,
+            linear_ops=linear_ops
         )
         return q_linear
 
@@ -120,6 +132,7 @@ class WQLinear_GGUF(nn.Module):
             )
         )
 
+    
     @torch.no_grad()
     def forward(self, x):
         # x = torch.matmul(x, dequantize_blocks_Q4_0(self.qweight))
@@ -127,8 +140,11 @@ class WQLinear_GGUF(nn.Module):
             x = F.linear(x, dequantize_blocks_Q4_0(
                 self.Q4_0_qweight, x.dtype), self.bias.to(x.dtype) if self.bias is not None else None)
         elif self.qtype == "Q8_0":
-            x = F.linear(x, dequantize_blocks_Q8_0(
-                self.Q8_0_qweight, x.dtype), self.bias.to(x.dtype) if self.bias is not None else None)
+            dequant = dequantize_blocks_Q8_0(self.Q8_0_qweight, x.dtype)
+            
+            #x = F.linear(x, dequant, self.bias.to(x.dtype) if self.bias is not None else None)
+            x = self.linear_ops(x, dequant, bias=self.bias.to(x.dtype) if self.bias is not None else None)
+         
         else:
             raise ValueError(f"Unknown qtype: {self.qtype}")
 

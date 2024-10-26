@@ -1,7 +1,7 @@
 import json
 from typing import Dict, List, Optional, Union
 
-#temporary patch to fix bug in Windows
+#temporary patch to fix torch compile bug in Windows
 def patched_write_atomic(
     path_: str,
     content: Union[str, bytes],
@@ -24,7 +24,7 @@ def patched_write_atomic(
     write_mode = "w" if isinstance(content, str) else "wb"
     with tmp_path.open(write_mode, encoding="utf-8" if encode_utf_8 else None) as f:
         f.write(content)
-    shutil.copy2(src=tmp_path, dst=path) #to allow overwriting cache files
+    shutil.copy2(src=tmp_path, dst=path) #changed to allow overwriting cache files
     os.remove(tmp_path)
 try:
     import torch._inductor.codecache
@@ -37,7 +37,7 @@ import torch.nn.functional as F
 import torch.utils.data
 from einops import rearrange, repeat
 
-from .dit.joint_model.context_parallel import get_cp_rank_size
+#from .dit.joint_model.context_parallel import get_cp_rank_size
 from tqdm import tqdm
 from comfy.utils import ProgressBar, load_torch_file
 import comfy.model_management as mm 
@@ -133,9 +133,11 @@ class T2VSynthMochiModel:
         fp8_fastmode: bool = False,
         attention_mode: str = "sdpa",
         compile_args: Optional[Dict] = None,
+        cublas_ops: Optional[bool] = False,
     ):
         super().__init__()
         self.device = device
+        self.weight_dtype = weight_dtype
         self.offload_device = offload_device
 
         logging.info("Initializing model...")
@@ -170,7 +172,7 @@ class T2VSynthMochiModel:
             import importlib
             importlib.reload(mz_gguf_loader)
             with mz_gguf_loader.quantize_lazy_load():
-                model = mz_gguf_loader.quantize_load_state_dict(model, dit_sd, device="cpu")
+                model = mz_gguf_loader.quantize_load_state_dict(model, dit_sd, device="cpu", cublas_ops=cublas_ops)
         elif is_accelerate_available:
             logging.info("Using accelerate to load and assign model weights to device...")
             for name, param in model.named_parameters():
@@ -206,51 +208,6 @@ class T2VSynthMochiModel:
         vae_stats = json.load(open(vae_stats_path))
         self.vae_mean = torch.Tensor(vae_stats["mean"]).to(self.device)
         self.vae_std = torch.Tensor(vae_stats["std"]).to(self.device)
-
-    def get_conditioning(self, prompts, *, zero_last_n_prompts: int):
-        B = len(prompts)
-        assert (
-            0 <= zero_last_n_prompts <= B
-        ), f"zero_last_n_prompts should be between 0 and {B}, got {zero_last_n_prompts}"
-        tokenize_kwargs = dict(
-            prompt=prompts,
-            padding="max_length",
-            return_tensors="pt",
-            truncation=True,
-        )
-
-        t5_toks = self.t5_tokenizer(**tokenize_kwargs, max_length=MAX_T5_TOKEN_LENGTH)
-        caption_input_ids_t5 = t5_toks["input_ids"]
-        caption_attention_mask_t5 = t5_toks["attention_mask"].bool()
-        del t5_toks
-
-        assert caption_input_ids_t5.shape == (B, MAX_T5_TOKEN_LENGTH)
-        assert caption_attention_mask_t5.shape == (B, MAX_T5_TOKEN_LENGTH)
-
-        if zero_last_n_prompts > 0:
-            # Zero the last N prompts
-            caption_input_ids_t5[-zero_last_n_prompts:] = 0
-            caption_attention_mask_t5[-zero_last_n_prompts:] = False
-
-        caption_input_ids_t5 = caption_input_ids_t5.to(self.device, non_blocking=True)
-        caption_attention_mask_t5 = caption_attention_mask_t5.to(
-            self.device, non_blocking=True
-        )
-
-        y_mask = [caption_attention_mask_t5]
-        y_feat = []
-
-        self.t5_enc.to(self.device)
-        y_feat.append(
-            self.t5_enc(
-                caption_input_ids_t5, caption_attention_mask_t5
-            ).last_hidden_state.detach().to(torch.float32)
-        )
-        self.t5_enc.to(self.offload_device)
-        # Sometimes returns a tensor, othertimes a tuple, not sure why
-        # See: https://huggingface.co/genmo/mochi-1-preview/discussions/3
-        assert tuple(y_feat[-1].shape) == (B, MAX_T5_TOKEN_LENGTH, 4096)
-        return dict(y_mask=y_mask, y_feat=y_feat)
 
     def get_packed_indices(self, y_mask, *, lT, lW, lH):
         patch_size = 2
@@ -364,7 +321,11 @@ class T2VSynthMochiModel:
                 out_cond, out_uncond = torch.chunk(out, chunks=2, dim=0)
             else:
                 nonlocal sample, sample_null
-                with torch.autocast(mm.get_autocast_device(self.device), dtype=torch.bfloat16):
+                if hasattr(self.dit, "cublas_half_matmul") and self.dit.cublas_half_matmul:
+                    autocast_dtype = torch.float16
+                else:
+                    autocast_dtype = torch.bfloat16
+                with torch.autocast(mm.get_autocast_device(self.device), dtype=autocast_dtype):
                     out_cond = self.dit(z, sigma, **sample)
                     out_uncond = self.dit(z, sigma, **sample_null)
 
@@ -390,11 +351,11 @@ class T2VSynthMochiModel:
             z = z + dsigma * pred
             comfy_pbar.update(1)
 
-        cp_rank, cp_size = get_cp_rank_size()
+        #cp_rank, cp_size = get_cp_rank_size()
         if batch_cfg:
             z = z[:B]
-        z = z.tensor_split(cp_size, dim=2)[cp_rank]  # split along temporal dim
-        self.dit.to(self.offload_device)
+        #z = z.tensor_split(cp_size, dim=2)[cp_rank]  # split along temporal dim
+        self.dit.to(self.offload_device, non_blocking=True)
     
         samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
         logging.info(f"samples shape: {samples.shape}")
