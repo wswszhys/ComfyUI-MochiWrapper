@@ -135,20 +135,13 @@ class WQLinear_GGUF(nn.Module):
     
     @torch.no_grad()
     def forward(self, x):
-        # x = torch.matmul(x, dequantize_blocks_Q4_0(self.qweight))
         if self.qtype == "Q4_0":
-            x = F.linear(x, dequantize_blocks_Q4_0(
-                self.Q4_0_qweight, x.dtype), self.bias.to(x.dtype) if self.bias is not None else None)
+            dequant = dequantize_blocks_Q4_0(self.Q4_0_qweight, x.dtype)
         elif self.qtype == "Q8_0":
             dequant = dequantize_blocks_Q8_0(self.Q8_0_qweight, x.dtype)
-            
-            #x = F.linear(x, dequant, self.bias.to(x.dtype) if self.bias is not None else None)
-            x = self.linear_ops(x, dequant, bias=self.bias.to(x.dtype) if self.bias is not None else None)
-         
         else:
             raise ValueError(f"Unknown qtype: {self.qtype}")
-
-        return x
+        return self.linear_ops(x, dequant, bias=self.bias.to(x.dtype) if self.bias is not None else None)
 
 
 def split_block_dims(blocks, *args):

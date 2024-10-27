@@ -169,6 +169,8 @@ class MochiModelLoader:
             "optional": {
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
                 "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
+                "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops from'https://github.com/aredden/torch-cublas-hgemm'",}),
+           
             },
         }
     RETURN_TYPES = ("MOCHIMODEL",)
@@ -176,7 +178,7 @@ class MochiModelLoader:
     FUNCTION = "loadmodel"
     CATEGORY = "MochiWrapper"
 
-    def loadmodel(self, model_name, precision, attention_mode, trigger=None, compile_args=None):
+    def loadmodel(self, model_name, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -193,7 +195,8 @@ class MochiModelLoader:
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
             attention_mode=attention_mode,
-            compile_args=compile_args
+            compile_args=compile_args,
+            cublas_ops=cublas_ops
         )
 
         return (model, )
