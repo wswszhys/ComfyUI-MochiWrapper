@@ -370,10 +370,10 @@ class MochiSampler:
 
         if opt_sigmas is not None:
             sigma_schedule = opt_sigmas.tolist()
-            logging.info(f"Using sigmas: {sigma_schedule}")
+            logging.info(f"Using sigma_schedule: {sigma_schedule}")
         else:
             sigma_schedule = linear_quadratic_schedule(steps, 0.025)
-            logging.info(f"Using sigmas: {sigma_schedule}")
+            logging.info(f"Using sigma_schedule: {sigma_schedule}")
 
         cfg_schedule = cfg_schedule or [cfg] * steps
         logging.info(f"Using cfg schedule: {cfg_schedule}")
