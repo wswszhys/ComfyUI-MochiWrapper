@@ -374,7 +374,7 @@ class MochiSampler:
         if opt_sigmas is not None:
             sigma_schedule = opt_sigmas.tolist()
             steps = len(sigma_schedule)
-            sigma_schedule.extend([1.0])
+            sigma_schedule.extend([0.0])
             
             logging.info(f"Using sigma_schedule: {sigma_schedule}")
         else:
