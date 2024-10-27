@@ -364,7 +364,7 @@ class MochiSampler:
         }
 
     RETURN_TYPES = ("LATENT",)
-    RETURN_NAMES = ("model", "samples",)
+    RETURN_NAMES = ("samples",)
     FUNCTION = "process"
     CATEGORY = "MochiWrapper"
 
