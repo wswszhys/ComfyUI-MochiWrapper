@@ -141,6 +141,7 @@ class WQLinear_GGUF(nn.Module):
             dequant = dequantize_blocks_Q8_0(self.Q8_0_qweight, x.dtype)
         else:
             raise ValueError(f"Unknown qtype: {self.qtype}")
+        
         return self.linear_ops(x, dequant, bias=self.bias.to(x.dtype) if self.bias is not None else None)
 
 

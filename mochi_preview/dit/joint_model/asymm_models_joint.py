@@ -237,7 +237,8 @@ class AsymmetricAttention(nn.Module):
             return out.view(total, local_dim)
         
     def sdpa_attention(self, qkv):
-        q, k, v = rearrange(qkv, '(b s) t h d -> t b h s d', b=1)
+        q, k, v = qkv.unbind(dim=1)
+        q, k, v = [x.permute(1, 0, 2).unsqueeze(0) for x in (q, k, v)]
         with torch.autocast(mm.get_autocast_device(self.device), enabled=False):
             with sdpa_kernel(backends):
                 out = F.scaled_dot_product_attention(
@@ -248,10 +249,13 @@ class AsymmetricAttention(nn.Module):
                     dropout_p=0.0, 
                     is_causal=False
                     )
-                return rearrange(out, 'b h s d -> s (b h d)')
+                return out.permute(2, 0, 1, 3).reshape(out.shape[2], -1)
         
     def sage_attention(self, qkv):
-        q, k, v = rearrange(qkv, '(b s) t h d -> t b h s d', b=1)
+        #q, k, v = rearrange(qkv, '(b s) t h d -> t b h s d', b=1)
+        q, k, v = qkv.unbind(dim=1)
+        q, k, v = [x.permute(1, 0, 2).unsqueeze(0) for x in (q, k, v)]
+
         with torch.autocast(mm.get_autocast_device(self.device), enabled=False):
             out = sageattn(
                 q, 
@@ -261,11 +265,14 @@ class AsymmetricAttention(nn.Module):
                 dropout_p=0.0, 
                 is_causal=False
                 )
-            return rearrange(out, 'b h s d -> s (b h d)')
+            #print(out.shape)
+            #out = rearrange(out, 'b h s d -> s (b h d)')
+            return out.permute(2, 0, 1, 3).reshape(out.shape[2], -1)
         
     def comfy_attention(self, qkv):
         from comfy.ldm.modules.attention import optimized_attention
-        q, k, v = rearrange(qkv, '(b s) t h d -> t b h s d', b=1)
+        q, k, v = qkv.unbind(dim=1)
+        q, k, v = [x.permute(1, 0, 2).unsqueeze(0) for x in (q, k, v)]
         with torch.autocast(mm.get_autocast_device(self.device), enabled=False):
             out = optimized_attention(
                 q, 

@@ -325,13 +325,15 @@ class T2VSynthMochiModel:
                 out_cond, out_uncond = torch.chunk(out, chunks=2, dim=0)
             else:
                 nonlocal sample, sample_null
-               
                 with torch.autocast(mm.get_autocast_device(self.device), dtype=autocast_dtype):
-                    out_cond = self.dit(z, sigma, **sample)
-                    out_uncond = self.dit(z, sigma, **sample_null)
+                    if cfg_scale > 1.0:
+                        out_cond = self.dit(z, sigma, **sample)
+                        out_uncond = self.dit(z, sigma, **sample_null)
+                    else:
+                        out_cond = self.dit(z, sigma, **sample)
+                        return out_cond
 
-            assert out_cond.shape == out_uncond.shape
-            return out_uncond + cfg_scale * (out_cond - out_uncond), out_cond
+            return out_uncond + cfg_scale * (out_cond - out_uncond)
         
         comfy_pbar = ProgressBar(sample_steps)
         for i in tqdm(range(0, sample_steps), desc="Processing Samples", total=sample_steps):
@@ -339,7 +341,7 @@ class T2VSynthMochiModel:
             dsigma = sigma - sigma_schedule[i + 1]
 
             # `pred` estimates `z_0 - eps`.
-            pred, output_cond = model_fn(
+            pred = model_fn(
                 z=z,
                 sigma=torch.full(
                     [B] if not batch_cfg else [B * 2], sigma, device=z.device
@@ -347,8 +349,6 @@ class T2VSynthMochiModel:
                 cfg_scale=cfg_schedule[i],
             )
             pred = pred.to(z)
-            output_cond = output_cond.to(z)
-
             z = z + dsigma * pred
             comfy_pbar.update(1)
 
@@ -356,7 +356,6 @@ class T2VSynthMochiModel:
             z = z[:B]
        
         self.dit.to(self.offload_device)
-    
         samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
         logging.info(f"samples shape: {samples.shape}")
         return samples

@@ -373,6 +373,8 @@ class MochiSampler:
 
         if opt_sigmas is not None:
             sigma_schedule = opt_sigmas.tolist()
+            sigma_schedule.extend([1.0])
+            steps = len(sigma_schedule)
             logging.info(f"Using sigma_schedule: {sigma_schedule}")
         else:
             sigma_schedule = linear_quadratic_schedule(steps, 0.025)
