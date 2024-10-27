@@ -354,6 +354,9 @@ class MochiSampler:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 #"batch_cfg": ("BOOLEAN", {"default": False, "tooltip": "Enable batched cfg"}),
             },
+            "optional": {
+                "cfg_schedule": ("FLOAT", {"forceInput": True,}),
+            }
         }
 
     RETURN_TYPES = ("LATENT",)
@@ -361,11 +364,14 @@ class MochiSampler:
     FUNCTION = "process"
     CATEGORY = "MochiWrapper"
 
-    def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames):
+    def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames, cfg_schedule=None):
         mm.soft_empty_cache()
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+
+        cfg_schedule = cfg_schedule or [cfg] * steps
+        logging.info(f"Using cfg schedule: {cfg_schedule}")
 
         args = {
             "height": height,
@@ -373,7 +379,7 @@ class MochiSampler:
             "num_frames": num_frames,
             "mochi_args": {
                 "sigma_schedule": linear_quadratic_schedule(steps, 0.025),
-                "cfg_schedule": [cfg] * steps,
+                "cfg_schedule": cfg_schedule,
                 "num_inference_steps": steps,
                 "batch_cfg": False,
             },

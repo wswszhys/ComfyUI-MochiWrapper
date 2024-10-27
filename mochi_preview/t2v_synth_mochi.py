@@ -352,11 +352,10 @@ class T2VSynthMochiModel:
             z = z + dsigma * pred
             comfy_pbar.update(1)
 
-        #cp_rank, cp_size = get_cp_rank_size()
         if batch_cfg:
             z = z[:B]
-        #z = z.tensor_split(cp_size, dim=2)[cp_rank]  # split along temporal dim
-        self.dit.to(self.offload_device, non_blocking=True)
+       
+        self.dit.to(self.offload_device)
     
         samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
         logging.info(f"samples shape: {samples.shape}")
