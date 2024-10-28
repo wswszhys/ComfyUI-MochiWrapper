@@ -65,14 +65,14 @@ class DownloadAndLoadMochiModel:
                     {"tooltip": "Downloads from 'https://huggingface.co/Kijai/Mochi_preview_comfy' to 'models/vae/mochi'", },
                 ),
                  "precision": (["fp8_e4m3fn","fp8_e4m3fn_fast","fp16", "fp32", "bf16"],
-                    {"default": "fp8_e4m3fn", }),
+                    {"default": "fp8_e4m3fn", "tooltip": "The precision to use for the model weights. Has no effect with GGUF models"},),
                 "attention_mode": (["sdpa","flash_attn","sage_attn", "comfy"],
                 ),
             },
             "optional": {
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
                 "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
-                "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops from'https://github.com/aredden/torch-cublas-hgemm'",}),
+                "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops for the GGUF models, for more info:'https://github.com/aredden/torch-cublas-hgemm'",}),
             },
         }
 
@@ -169,7 +169,7 @@ class MochiModelLoader:
             "optional": {
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
                 "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
-                "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops from'https://github.com/aredden/torch-cublas-hgemm'",}),
+                "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops for the GGUF models, for more info:'https://github.com/aredden/torch-cublas-hgemm'",}),
            
             },
         }
@@ -315,18 +315,23 @@ class MochiTextEncode:
         load_device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
 
-        clip.tokenizer.t5xxl.pad_to_max_length = True
-        clip.tokenizer.t5xxl.max_length = max_tokens
-        clip.cond_stage_model.t5xxl.return_attention_masks = True
-        clip.cond_stage_model.t5xxl.enable_attention_masks = True
-        clip.cond_stage_model.t5_attention_mask = True
-        clip.cond_stage_model.to(load_device)
-        tokens = clip.tokenizer.t5xxl.tokenize_with_weights(prompt, return_word_ids=True)
-        
         try:
-            embeds, _, attention_mask = clip.cond_stage_model.t5xxl.encode_token_weights(tokens)
+            clip.tokenizer.t5xxl.pad_to_max_length = True
+            clip.tokenizer.t5xxl.max_length = max_tokens
+            clip.cond_stage_model.t5xxl.return_attention_masks = True
+            clip.cond_stage_model.t5xxl.enable_attention_masks = True
+            clip.cond_stage_model.t5_attention_mask = True
+            clip.cond_stage_model.to(load_device)
+            tokens = clip.tokenizer.t5xxl.tokenize_with_weights(prompt, return_word_ids=True)
+            try:
+                embeds, _, attention_mask = clip.cond_stage_model.t5xxl.encode_token_weights(tokens)
+            except:
+                NotImplementedError("Failed to get attention mask from T5, is your ComfyUI up to date?")
         except:
-            NotImplementedError("Failed to get attention mask from T5, is your ComfyUI up to date?")
+            clip.cond_stage_model.to(load_device)
+            tokens = clip.tokenizer.tokenize_with_weights(prompt, return_word_ids=True)
+            embeds, _, attention_mask = clip.cond_stage_model.encode_token_weights(tokens)
+        
 
         if embeds.shape[1] > 256:
             raise ValueError(f"Prompt is too long, max tokens supported is {max_tokens} or less, got {embeds.shape[1]}")
@@ -358,8 +363,8 @@ class MochiSampler:
                 #"batch_cfg": ("BOOLEAN", {"default": False, "tooltip": "Enable batched cfg"}),
             },
             "optional": {
-                "cfg_schedule": ("FLOAT", {"forceInput": True,}),
-                "opt_sigmas": ("SIGMAS",),
+                "cfg_schedule": ("FLOAT", {"forceInput": True, "tooltip": "Override cfg schedule with a list of ints"}),
+                "opt_sigmas": ("SIGMAS", {"tooltip": "Override sigma schedule and steps"}),
             }
         }
 
@@ -373,16 +378,28 @@ class MochiSampler:
 
         if opt_sigmas is not None:
             sigma_schedule = opt_sigmas.tolist()
-            steps = len(sigma_schedule)
+            steps = int(len(sigma_schedule))
             sigma_schedule.extend([0.0])
-            
             logging.info(f"Using sigma_schedule: {sigma_schedule}")
         else:
             sigma_schedule = linear_quadratic_schedule(steps, 0.025)
-            logging.info(f"Using sigma_schedule: {sigma_schedule}")
 
-        cfg_schedule = cfg_schedule or [cfg] * steps
-        logging.info(f"Using cfg schedule: {cfg_schedule}")
+        if cfg_schedule is None:
+            cfg_schedule = [cfg] * steps
+        else:
+            logging.info(f"Using cfg schedule: {cfg_schedule}")
+
+        #For compatibility with Comfy CLIPTextEncode
+        if not isinstance(positive, dict):
+            positive = {
+                "embeds": positive[0][0],
+                "attention_mask": positive[0][1]["attention_mask"].bool(),
+                }
+        if not isinstance(negative, dict):
+            negative = {
+                "embeds": negative[0][0],
+                "attention_mask": negative[0][1]["attention_mask"].bool(),
+                }
 
         args = {
             "height": height,
