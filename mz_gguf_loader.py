@@ -27,6 +27,7 @@ def quantize_load_state_dict(model, state_dict, device="cpu", cublas_ops=False):
             setattr(model, "cublas_half_matmul", True)
             print("Using cublas_ops")
         except:
+            print("Failed to load cublas_ops")
             raise ImportError("Install cublas_ops (https://github.com/aredden/torch-cublas-hgemm) to use cublas_ops")
     else:
         linear_ops = F.linear
