@@ -328,16 +328,16 @@ class MochiTextEncode:
             except:
                 NotImplementedError("Failed to get attention mask from T5, is your ComfyUI up to date?")
         except:
-            clip.cond_stage_model.to(load_device)
+            clip.cond_stage_model.to(offload_device)
             tokens = clip.tokenizer.tokenize_with_weights(prompt, return_word_ids=True)
             embeds, _, attention_mask = clip.cond_stage_model.encode_token_weights(tokens)
         
-
         if embeds.shape[1] > 256:
             raise ValueError(f"Prompt is too long, max tokens supported is {max_tokens} or less, got {embeds.shape[1]}")
         embeds *= strength
         if force_offload:
             clip.cond_stage_model.to(offload_device)
+            mm.soft_empty_cache()
 
         t5_embeds = {
             "embeds": embeds,
@@ -409,7 +409,6 @@ class MochiSampler:
                 "sigma_schedule": sigma_schedule,
                 "cfg_schedule": cfg_schedule,
                 "num_inference_steps": steps,
-                "batch_cfg": False,
             },
             "positive_embeds": positive,
             "negative_embeds": negative,
@@ -597,10 +596,11 @@ class MochiDecodeSpatialTiling:
                         decoded_list[-1][:, :, -1:, :, :] = blended_frames
                     
                     decoded_list.append(frames)
+                frames = torch.cat(decoded_list, dim=2)
             else:
                 logging.info("Decoding without tiling...")
                 frames = vae(samples)
-        frames = torch.cat(decoded_list, dim=2)
+        
         vae.to(offload_device)
 
         frames = frames.float()
