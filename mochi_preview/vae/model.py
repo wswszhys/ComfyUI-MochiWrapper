@@ -550,6 +550,7 @@ class Decoder(nn.Module):
         nonlinearity: str = "silu",
         output_nonlinearity: str = "silu",
         causal: bool = True,
+        dtype: torch.dtype = torch.float32,
         **block_kwargs,
     ):
         super().__init__()
@@ -558,6 +559,7 @@ class Decoder(nn.Module):
         self.channel_multipliers = channel_multipliers
         self.num_res_blocks = num_res_blocks
         self.output_nonlinearity = output_nonlinearity
+        self.dtype = dtype
         assert nonlinearity == "silu"
         assert causal
 
@@ -718,18 +720,27 @@ def blend_vertical(a: torch.Tensor, b: torch.Tensor, overlap: int) -> torch.Tens
 def nearest_multiple(x: int, multiple: int) -> int:
     return round(x / multiple) * multiple
 
-
+from tqdm import tqdm
+from comfy.utils import ProgressBar
 def apply_tiled(
     fn: Callable[[torch.Tensor], torch.Tensor],
     x: torch.Tensor,
     num_tiles_w: int,
     num_tiles_h: int,
-    overlap: int = 0,  # Number of pixel of overlap between adjacent tiles.
-    # Use a factor of 2 times the latent downsample factor.
+    overlap: int = 0,  # Number of pixels of overlap between adjacent tiles.
     min_block_size: int = 1,  # Minimum number of pixels in each dimension when subdividing.
+    pbar: Optional[tqdm] = None,
+    comfy_pbar: Optional[ProgressBar] = None,
 ):
+    if pbar is None:
+        total_tiles = num_tiles_w * num_tiles_h
+        pbar = tqdm(total=total_tiles)
+        comfy_pbar = ProgressBar(total_tiles)
     if num_tiles_w == 1 and num_tiles_h == 1:
-        return fn(x)
+        result = fn(x)
+        pbar.update(1)
+        comfy_pbar.update(1)
+        return result
 
     assert (
         num_tiles_w & (num_tiles_w - 1) == 0
@@ -752,10 +763,10 @@ def apply_tiled(
 
         assert num_tiles_w % 2 == 0, f"num_tiles_w={num_tiles_w} must be even"
         left = apply_tiled(
-            fn, left, num_tiles_w // 2, num_tiles_h, overlap, min_block_size
+            fn, left, num_tiles_w // 2, num_tiles_h, overlap, min_block_size, pbar, comfy_pbar
         )
         right = apply_tiled(
-            fn, right, num_tiles_w // 2, num_tiles_h, overlap, min_block_size
+            fn, right, num_tiles_w // 2, num_tiles_h, overlap, min_block_size, pbar, comfy_pbar
         )
         if left is None or right is None:
             return None
@@ -774,10 +785,10 @@ def apply_tiled(
 
         assert num_tiles_h % 2 == 0, f"num_tiles_h={num_tiles_h} must be even"
         top = apply_tiled(
-            fn, top, num_tiles_w, num_tiles_h // 2, overlap, min_block_size
+            fn, top, num_tiles_w, num_tiles_h // 2, overlap, min_block_size, pbar, comfy_pbar
         )
         bottom = apply_tiled(
-            fn, bottom, num_tiles_w, num_tiles_h // 2, overlap, min_block_size
+            fn, bottom, num_tiles_w, num_tiles_h // 2, overlap, min_block_size, pbar, comfy_pbar
         )
         if top is None or bottom is None:
             return None
