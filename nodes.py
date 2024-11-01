@@ -52,7 +52,7 @@ class MochiSigmaSchedule:
                 "num_steps": ("INT", {"default": 30, "tooltip": "Number of steps","min": 0, "max": 10000, "step": 1}),
                 "threshold_noise": ("FLOAT", {"default": 0.025, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "linear_steps": ("INT", {"default": 15, "min": 1, "max": 10000, "step": 1, "tooltip": "Number of steps to scale linearly, default should be half the steps"}),
-
+                "denoise": ("FLOAT", {"default": 1, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
         }
     RETURN_TYPES = ("SIGMAS",)
@@ -61,10 +61,16 @@ class MochiSigmaSchedule:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
 
-    def loadmodel(self, num_steps, threshold_noise, linear_steps=None):
+    def loadmodel(self, num_steps, threshold_noise, denoise, linear_steps=None):
+        total_steps = num_steps
+        if denoise < 1.0:
+            if denoise <= 0.0:
+                return ([],)
+            total_steps = int(num_steps/denoise)
 
-        sigma_schedule = linear_quadratic_schedule(num_steps, threshold_noise, linear_steps)
-        sigma_schedule = torch.tensor(sigma_schedule[:-1])
+        sigma_schedule = linear_quadratic_schedule(total_steps, threshold_noise, linear_steps)
+        sigma_schedule = sigma_schedule[-(num_steps + 1):]
+        sigma_schedule = torch.FloatTensor(sigma_schedule)
 
         return (sigma_schedule, )
     
