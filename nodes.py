@@ -13,7 +13,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 log = logging.getLogger(__name__)
 
 from .mochi_preview.t2v_synth_mochi import T2VSynthMochiModel
-from .mochi_preview.vae.model import Decoder
+from .mochi_preview.vae.model import Decoder, Encoder, add_fourier_features 
+from .mochi_preview.vae.vae_stats import vae_latents_to_dit_latents, dit_latents_to_vae_latents
 
 from contextlib import nullcontext
 try:
@@ -140,7 +141,6 @@ class DownloadAndLoadMochiModel:
                     num_res_blocks=[3, 3, 4, 6, 3],
                     latent_dim=12,
                     has_attention=[False, False, False, False, False],
-                    padding_mode="replicate",
                     output_norm=False,
                     nonlinearity="silu",
                     output_nonlinearity="silu",
@@ -269,7 +269,6 @@ class MochiVAELoader:
                     num_res_blocks=[3, 3, 4, 6, 3],
                     latent_dim=12,
                     has_attention=[False, False, False, False, False],
-                    padding_mode="replicate",
                     output_norm=False,
                     nonlinearity="silu",
                     output_nonlinearity="silu",
@@ -291,6 +290,74 @@ class MochiVAELoader:
             vae = torch.compile(vae, fullgraph=torch_compile_args["fullgraph"], mode=torch_compile_args["mode"], dynamic=False, backend=torch_compile_args["backend"])
     
         return (vae,)
+    
+class MochiVAEEncoderLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": { 
+                "model_name": (folder_paths.get_filename_list("vae"), {"tooltip": "The name of the checkpoint (vae) to load."}),
+            },
+            "optional": {
+                "torch_compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
+                "precision": (["fp16", "fp32", "bf16"], {"default": "bf16"}),
+            },
+        }
+
+    RETURN_TYPES = ("MOCHIVAE",)
+    RETURN_NAMES = ("mochi_vae", )
+    FUNCTION = "loadmodel"
+    CATEGORY = "MochiWrapper"
+
+    def loadmodel(self, model_name, torch_compile_args=None, precision="bf16"):
+        
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        mm.soft_empty_cache()
+
+        dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
+
+        config = dict(
+                    prune_bottlenecks=[False, False, False, False, False],
+                    has_attentions=[False, True, True, True, True],
+                    affine=True,
+                    bias=True,
+                    input_is_conv_1x1=True,
+                    padding_mode="replicate"
+                )
+
+        vae_path = folder_paths.get_full_path_or_raise("vae", model_name)
+        
+
+        # Create VAE encoder
+        with (init_empty_weights() if is_accelerate_available else nullcontext()):
+            encoder = Encoder(
+                in_channels=15,
+                base_channels=64,
+                channel_multipliers=[1, 2, 4, 6],
+                num_res_blocks=[3, 3, 4, 6, 3],
+                latent_dim=12,
+                temporal_reductions=[1, 2, 3],
+                spatial_reductions=[2, 2, 2],
+                dtype = dtype,
+                **config,
+            )
+
+        encoder_sd = load_torch_file(vae_path)
+        if is_accelerate_available:
+            for name, param in encoder.named_parameters():
+                set_module_tensor_to_device(encoder, name, dtype=dtype, device=offload_device, value=encoder_sd[name])
+        else:
+            encoder.load_state_dict(encoder_sd, strict=True)
+            encoder.to(dtype).to(offload_device)
+        encoder.eval()
+        del encoder_sd
+
+        if torch_compile_args is not None:
+            encoder.to(device)
+            encoder = torch.compile(encoder, fullgraph=torch_compile_args["fullgraph"], mode=torch_compile_args["mode"], dynamic=False, backend=torch_compile_args["backend"])
+    
+        return (encoder,)
     
 class MochiTextEncode:
     @classmethod
@@ -365,6 +432,7 @@ class MochiSampler:
             "optional": {
                 "cfg_schedule": ("FLOAT", {"forceInput": True, "tooltip": "Override cfg schedule with a list of ints"}),
                 "opt_sigmas": ("SIGMAS", {"tooltip": "Override sigma schedule and steps"}),
+                "samples": ("LATENT", ),
             }
         }
 
@@ -373,7 +441,7 @@ class MochiSampler:
     FUNCTION = "process"
     CATEGORY = "MochiWrapper"
 
-    def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames, cfg_schedule=None, opt_sigmas=None):
+    def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames, cfg_schedule=None, opt_sigmas=None, samples=None):
         mm.soft_empty_cache()
 
         if opt_sigmas is not None:
@@ -413,6 +481,7 @@ class MochiSampler:
             "positive_embeds": positive,
             "negative_embeds": negative,
             "seed": seed,
+            "samples": samples["samples"] if samples is not None else None,
         }
         latents = model.run(args)
     
@@ -447,6 +516,7 @@ class MochiDecode:
         offload_device = mm.unet_offload_device()
         intermediate_device = mm.intermediate_device()
         samples = samples["samples"]
+        samples = dit_latents_to_vae_latents(samples)
         samples = samples.to(vae.dtype).to(device)
 
         B, C, T, H, W = samples.shape
@@ -574,6 +644,7 @@ class MochiDecodeSpatialTiling:
         offload_device = mm.unet_offload_device()
         intermediate_device = mm.intermediate_device()
         samples = samples["samples"]
+        samples = dit_latents_to_vae_latents(samples)
         samples = samples.to(vae.dtype).to(device)
 
         B, C, T, H, W = samples.shape
@@ -615,7 +686,102 @@ class MochiDecodeSpatialTiling:
         frames = rearrange(frames, "b c t h w -> (t b) h w c").to(intermediate_device)
 
         return (frames,)
+    
+class MochiImageEncode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "encoder": ("MOCHIVAE",),
+            "images": ("IMAGE", ),
+            },
+        }
 
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "decode"
+    CATEGORY = "MochiWrapper"
+
+    def decode(self, encoder, images):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        intermediate_device = mm.intermediate_device()
+
+        B, H, W, C = images.shape
+        
+        images = images.unsqueeze(0) * 2 - 1
+        images = rearrange(images, "t b h w c -> t c b h w")
+        images = images.to(encoder.dtype).to(device)
+        print(images.shape)
+        
+        encoder.to(device)
+        print("images before encoding", images.shape)
+        with torch.autocast(mm.get_autocast_device(device), dtype=encoder.dtype):
+                video = add_fourier_features(images)          
+                latents = encoder(video).sample()
+        latents = vae_latents_to_dit_latents(latents)
+        print("encoder output",latents.shape)
+
+        return ({"samples": latents},)
+
+class MochiLatentPreview:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "samples": ("LATENT",),
+                #  "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                #  "min_val": ("FLOAT", {"default": -0.15, "min": -1.0, "max": 0.0, "step": 0.001}),
+                #  "max_val": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.001}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",  )
+    RETURN_NAMES = ("images", )
+    FUNCTION = "sample"
+    CATEGORY = "PyramidFlowWrapper"
+
+    def sample(self, samples):#, seed, min_val, max_val):
+        mm.soft_empty_cache()
+
+        latents = samples["samples"].clone()
+        print("in sample", latents.shape)   
+
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+ 
+        latent_rgb_factors = [[0.1236769792512748, 0.11775175335219157, -0.17700629766423637], [-0.08504104329270078, 0.026605813147523694, -0.006843165704926019], [-0.17093308616366876, 0.027991854696200386, 0.14179146288816308], [-0.17179555328757623, 0.09844317368603078, 0.14470997015982784], [-0.16975067171668484, -0.10739852629856643, -0.1894254942909962], [-0.19315259266769888, -0.011029760569485209, -0.08519702054654255], [-0.08399895091432583, -0.0964246452052032, -0.033622359523655665], [0.08148916330842498, 0.027500645903400067, -0.06593099749891196], [0.0456603103902293, -0.17844808072462398, 0.04204775167149785], [0.001751626383204502, -0.030567890189647867, -0.022078082809772193], [0.05110631095056278, -0.0709677393548804, 0.08963683539504264], [0.010515800868829, -0.18382052841762514, -0.08554553339721907]]
+
+        # import random
+        # random.seed(seed)
+        # latent_rgb_factors = [[random.uniform(min_val, max_val) for _ in range(3)] for _ in range(12)]
+        # out_factors = latent_rgb_factors
+        # print(latent_rgb_factors)
+       
+        
+        latent_rgb_factors_bias = [0,0,0]
+        
+        latent_rgb_factors = torch.tensor(latent_rgb_factors, device=latents.device, dtype=latents.dtype).transpose(0, 1)
+        latent_rgb_factors_bias = torch.tensor(latent_rgb_factors_bias, device=latents.device, dtype=latents.dtype)
+
+        print("latent_rgb_factors", latent_rgb_factors.shape)
+
+        latent_images = []
+        for t in range(latents.shape[2]):
+            latent = latents[:, :, t, :, :]
+            latent = latent[0].permute(1, 2, 0)
+            latent_image = torch.nn.functional.linear(
+                latent,
+                latent_rgb_factors,
+                bias=latent_rgb_factors_bias
+            )
+            latent_images.append(latent_image)
+        latent_images = torch.stack(latent_images, dim=0)
+        print("latent_images", latent_images.shape)
+        latent_images_min = latent_images.min()
+        latent_images_max = latent_images.max()
+        latent_images = (latent_images - latent_images_min) / (latent_images_max - latent_images_min)
+        
+        return (latent_images.float().cpu(),)    
 
 NODE_CLASS_MAPPINGS = {
     "DownloadAndLoadMochiModel": DownloadAndLoadMochiModel,
@@ -624,8 +790,11 @@ NODE_CLASS_MAPPINGS = {
     "MochiTextEncode": MochiTextEncode,
     "MochiModelLoader": MochiModelLoader,
     "MochiVAELoader": MochiVAELoader,
+    "MochiVAEEncoderLoader": MochiVAEEncoderLoader,
     "MochiDecodeSpatialTiling": MochiDecodeSpatialTiling,
-    "MochiTorchCompileSettings": MochiTorchCompileSettings
+    "MochiTorchCompileSettings": MochiTorchCompileSettings,
+    "MochiImageEncode": MochiImageEncode,
+    "MochiLatentPreview": MochiLatentPreview
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadAndLoadMochiModel": "(Down)load Mochi Model",
@@ -633,7 +802,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MochiDecode": "Mochi Decode",
     "MochiTextEncode": "Mochi TextEncode",
     "MochiModelLoader": "Mochi Model Loader",
-    "MochiVAELoader": "Mochi VAE Loader",
+    "MochiVAELoader": "Mochi VAE Decoder Loader",
+    "MochiVAEEncoderLoader": "Mochi VAE Encoder Loader",
     "MochiDecodeSpatialTiling": "Mochi VAE Decode Spatial Tiling",
-    "MochiTorchCompileSettings": "Mochi Torch Compile Settings"
+    "MochiTorchCompileSettings": "Mochi Torch Compile Settings",
+    "MochiImageEncode": "Mochi Image Encode",
+    "MochiLatentPreview": "Mochi Latent Preview"
     }

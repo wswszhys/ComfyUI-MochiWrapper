@@ -233,6 +233,7 @@ class T2VSynthMochiModel:
         num_frames = args["num_frames"]
         height = args["height"]
         width = args["width"]
+        in_samples = args["samples"]
         
         sample_steps = args["mochi_args"]["num_inference_steps"]
         cfg_schedule = args["mochi_args"].get("cfg_schedule")
@@ -263,6 +264,8 @@ class T2VSynthMochiModel:
             generator=generator,
             dtype=torch.float32,
         )
+        if in_samples is not None:
+            z = z * sigma_schedule[0] + in_samples.to(self.device) * sigma_schedule[-1]
 
         sample = {
         "y_mask": [args["positive_embeds"]["attention_mask"].to(self.device)],
@@ -314,6 +317,6 @@ class T2VSynthMochiModel:
             comfy_pbar.update(1)
        
         self.dit.to(self.offload_device)
-        samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
-        logging.info(f"samples shape: {samples.shape}")
-        return samples
+        #samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
+        logging.info(f"samples shape: {z.shape}")
+        return z
