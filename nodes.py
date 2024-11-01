@@ -92,7 +92,7 @@ class DownloadAndLoadMochiModel:
                 ),
                 "vae": (
                     [   
-                        "mochi_preview_vae_bf16.safetensors",
+                        "mochi_preview_vae_decoder_bf16.safetensors",
                     ],
                     {"tooltip": "Downloads from 'https://huggingface.co/Kijai/Mochi_preview_comfy' to 'models/vae/mochi'", },
                 ),
