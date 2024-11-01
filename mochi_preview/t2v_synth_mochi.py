@@ -268,7 +268,7 @@ class T2VSynthMochiModel:
             dtype=torch.float32,
         )
         if in_samples is not None:
-            z = z * sigma_schedule[0] + in_samples.to(self.device) * sigma_schedule[-2]
+            z = z * sigma_schedule[0] + (1 -sigma_schedule[0]) * in_samples.to(self.device)
 
         sample = {
         "y_mask": [args["positive_embeds"]["attention_mask"].to(self.device)],
