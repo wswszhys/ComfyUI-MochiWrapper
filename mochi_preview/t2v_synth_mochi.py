@@ -247,6 +247,9 @@ class T2VSynthMochiModel:
             ), f"sigma_schedule must have length {sample_steps + 1}, got {len(sigma_schedule)}"
         assert (num_frames - 1) % 6 == 0, f"t - 1 must be divisible by 6, got {num_frames - 1}"
 
+        from ..latent_preview import prepare_callback
+        callback = prepare_callback(self.dit, sample_steps)
+
         # create z
         spatial_downsample = 8
         temporal_downsample = 6
@@ -265,7 +268,7 @@ class T2VSynthMochiModel:
             dtype=torch.float32,
         )
         if in_samples is not None:
-            z = z * sigma_schedule[0] + in_samples.to(self.device) * sigma_schedule[-1]
+            z = z * sigma_schedule[0] + in_samples.to(self.device) * sigma_schedule[-2]
 
         sample = {
         "y_mask": [args["positive_embeds"]["attention_mask"].to(self.device)],
@@ -314,7 +317,10 @@ class T2VSynthMochiModel:
             )
             pred = pred.to(z)
             z = z + dsigma * pred
-            comfy_pbar.update(1)
+            if callback is not None:
+                callback(i, z.detach()[0].permute(1,0,2,3), None, sample_steps)
+            else:
+                comfy_pbar.update(1)
        
         self.dit.to(self.offload_device)
         #samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)

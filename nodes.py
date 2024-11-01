@@ -468,6 +468,7 @@ class MochiSampler:
                 "embeds": negative[0][0],
                 "attention_mask": negative[0][1]["attention_mask"].bool(),
                 }
+            
 
         args = {
             "height": height,
