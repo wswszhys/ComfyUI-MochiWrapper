@@ -720,7 +720,7 @@ class MochiImageEncode:
         
         images = images.unsqueeze(0) * 2 - 1
         images = rearrange(images, "t b h w c -> t c b h w")
-        images = images.to(encoder.dtype).to(device)
+        images = images.to(device)
         print(images.shape)
         encoder.to(device)
         print("images before encoding", images.shape)
