@@ -899,6 +899,11 @@ class Encoder(nn.Module):
         assert logvar.shape == means.shape
         assert means.size(1) == self.latent_dim
 
+        noise = torch.randn(means.shape, device=means.device, dtype=means.dtype, generator=None)
+
+        # Just Gaussian sample with no scaling of variance.
+        return noise * torch.exp(logvar * 0.5) + means
+
         return LatentDistribution(means, logvar)
 
 

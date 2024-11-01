@@ -323,6 +323,5 @@ class T2VSynthMochiModel:
                 comfy_pbar.update(1)
        
         self.dit.to(self.offload_device)
-        #samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
         logging.info(f"samples shape: {z.shape}")
         return z
