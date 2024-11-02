@@ -389,6 +389,9 @@ class AsymmetricJointBlock(nn.Module):
             self.mod_y = nn.Linear(hidden_size_x, 4 * hidden_size_y, device=device)
         else:
             self.mod_y = nn.Linear(hidden_size_x, hidden_size_y, device=device)
+
+        self.cached_x_attention = [None, None]
+        self.cached_y_attention = [None, None]
         
         # Self-attention:
         self.attn = AsymmetricAttention(
@@ -428,6 +431,8 @@ class AsymmetricJointBlock(nn.Module):
         x: torch.Tensor,
         c: torch.Tensor,
         y: torch.Tensor,
+        fastercache_counter: Optional[int] = 0,
+        fastercache_start_step: Optional[int]  = 15,
         **attn_kwargs,
     ):
         """Forward pass of a block.
@@ -453,15 +458,36 @@ class AsymmetricJointBlock(nn.Module):
             scale_msa_y, gate_msa_y, scale_mlp_y, gate_mlp_y = mod_y.chunk(4, dim=1)
         else:
             scale_msa_y = mod_y
-
-        # Self-attention block.
-        x_attn, y_attn = self.attn(
-            x,
-            y,
-            scale_x=scale_msa_x,
-            scale_y=scale_msa_y,
-            **attn_kwargs,
-        )
+        
+        #fastercache
+        B = x.shape[0]
+        #print("x", x.shape) #([1, 9540, 3072])
+        if fastercache_counter >= fastercache_start_step + 3 and fastercache_counter%3!=0 and self.cached_x_attention[-1].shape[0] >= B:
+            x_attn = (
+                self.cached_x_attention[1][:B] + 
+                (self.cached_x_attention[1][:B] - self.cached_x_attention[0][:B]) 
+                * 0.3
+                ).to(x.device, non_blocking=True)
+            y_attn = (
+                self.cached_y_attention[1][:B] + 
+                (self.cached_y_attention[1][:B] - self.cached_y_attention[0][:B]) 
+                * 0.3
+                ).to(x.device, non_blocking=True)
+        else:
+            # Self-attention block.
+            x_attn, y_attn = self.attn(
+                x,
+                y,
+                scale_x=scale_msa_x,
+                scale_y=scale_msa_y,
+                **attn_kwargs,
+            )
+            if fastercache_counter == fastercache_start_step:
+                self.cached_x_attention = [x_attn, x_attn]
+                self.cached_y_attention = [y_attn, y_attn]    
+            elif fastercache_counter > fastercache_start_step:
+                self.cached_x_attention[-1].copy_(x_attn)
+                self.cached_y_attention[-1].copy_(y_attn)
 
         assert x_attn.size(1) == N
         x = residual_tanh_gated_rmsnorm(x, x_attn, gate_msa_x)
@@ -674,6 +700,8 @@ class AsymmDiTJoint(nn.Module):
         self,
         x: torch.Tensor,
         sigma: torch.Tensor,
+        fastercache_counter: int,
+        fastercache_start_step: int,
         y_feat: List[torch.Tensor],
         y_mask: List[torch.Tensor],
         packed_indices: Dict[str, torch.Tensor] = None,
@@ -707,7 +735,9 @@ class AsymmDiTJoint(nn.Module):
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
                 packed_indices=packed_indices,
-            )  # (B, M, D), (B, L, D)
+                fastercache_counter = fastercache_counter,
+                fastercache_start_step = fastercache_start_step,
+                )  # (B, M, D), (B, L, D)
         del y_feat  # Final layers don't use dense text features.
 
         x = self.final_layer(x, c)  # (B, M, patch_size ** 2 * out_channels)    
@@ -720,6 +750,6 @@ class AsymmDiTJoint(nn.Module):
             p1=self.patch_size,
             p2=self.patch_size,
             c=self.out_channels,
-        )
+        )  
 
         return x
