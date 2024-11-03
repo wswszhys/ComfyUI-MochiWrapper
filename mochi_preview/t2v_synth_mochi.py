@@ -146,7 +146,7 @@ class T2VSynthMochiModel:
                 if not any(keyword in name for keyword in params_to_keep):
                     set_module_tensor_to_device(model, name, dtype=weight_dtype, device=self.device, value=dit_sd[name])
                 else:
-                    set_module_tensor_to_device(model, name, dtype=torch.bfloat16, device=self.device, value=dit_sd[name])
+                    set_module_tensor_to_device(model, name, dtype=torch.float16, device=self.device, value=dit_sd[name])
         else:
             logging.info("Loading state_dict without accelerate...")
             model.load_state_dict(dit_sd)
@@ -154,11 +154,11 @@ class T2VSynthMochiModel:
                 if not any(keyword in name for keyword in params_to_keep):
                     param.data = param.data.to(weight_dtype)
                 else:
-                    param.data = param.data.to(torch.bfloat16)
+                    param.data = param.data.to(torch.float16)
         
         if fp8_fastmode:
             from ..fp8_optimization import convert_fp8_linear
-            convert_fp8_linear(model, torch.bfloat16)
+            convert_fp8_linear(model, torch.float16)
 
         model = model.eval().to(self.device)
 
@@ -245,7 +245,7 @@ class T2VSynthMochiModel:
         if hasattr(self.dit, "cublas_half_matmul") and self.dit.cublas_half_matmul:
             autocast_dtype = torch.float16
         else:
-            autocast_dtype = torch.bfloat16
+            autocast_dtype = torch.float16
 
         def model_fn(*, z, sigma, cfg_scale):
             nonlocal sample, sample_null
