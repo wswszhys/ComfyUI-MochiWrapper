@@ -33,9 +33,7 @@ except:
     pass
 
 import torch
-import torch.nn.functional as F
 import torch.utils.data
-from einops import rearrange, repeat
 
 #from .dit.joint_model.context_parallel import get_cp_rank_size
 from tqdm import tqdm
@@ -78,48 +76,6 @@ def unnormalize_latents(
     assert z.ndim == 5
     assert z.size(1) == mean.size(0) == std.size(0)
     return z * std.to(z) + mean.to(z)
-
-
-
-def compute_packed_indices(
-    N: int,
-    text_mask: List[torch.Tensor],
-) -> Dict[str, torch.Tensor]:
-    """
-    Based on https://github.com/Dao-AILab/flash-attention/blob/765741c1eeb86c96ee71a3291ad6968cfbf4e4a1/flash_attn/bert_padding.py#L60-L80
-
-    Args:
-        N: Number of visual tokens.
-        text_mask: (B, L) List of boolean tensor indicating which text tokens are not padding.
-
-    Returns:
-        packed_indices: Dict with keys for Flash Attention:
-            - valid_token_indices_kv: up to (B * (N + L),) tensor of valid token indices (non-padding)
-                                   in the packed sequence.
-            - cu_seqlens_kv: (B + 1,) tensor of cumulative sequence lengths in the packed sequence.
-            - max_seqlen_in_batch_kv: int of the maximum sequence length in the batch.
-    """
-    # Create an expanded token mask saying which tokens are valid across both visual and text tokens.
-    assert N > 0 and len(text_mask) == 1
-    text_mask = text_mask[0]
-
-    mask = F.pad(text_mask, (N, 0), value=True)  # (B, N + L)
-    seqlens_in_batch = mask.sum(dim=-1, dtype=torch.int32)  # (B,)
-    valid_token_indices = torch.nonzero(
-        mask.flatten(), as_tuple=False
-    ).flatten()  # up to (B * (N + L),)
-
-    assert valid_token_indices.size(0) >= text_mask.size(0) * N  # At least (B * N,)
-    cu_seqlens = F.pad(
-        torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0)
-    )
-    max_seqlen_in_batch = seqlens_in_batch.max().item()
-
-    return {
-        "cu_seqlens_kv": cu_seqlens,
-        "max_seqlen_in_batch_kv": max_seqlen_in_batch,
-        "valid_token_indices_kv": valid_token_indices,
-    }
 
 class T2VSynthMochiModel:
     def __init__(
@@ -166,6 +122,17 @@ class T2VSynthMochiModel:
         params_to_keep = {"t_embedder", "x_embedder", "pos_frequencies", "t5", "norm"}
         logging.info(f"Loading model state_dict from {dit_checkpoint_path}...")
         dit_sd = load_torch_file(dit_checkpoint_path)
+
+        #comfy format
+        prefix = "model.diffusion_model."
+        first_key = next(iter(dit_sd), None)
+        if first_key and first_key.startswith(prefix):
+            new_dit_sd = {
+                key[len(prefix):] if key.startswith(prefix) else key: value
+                for key, value in dit_sd.items()
+            }
+            dit_sd = new_dit_sd
+                
         if "gguf" in dit_checkpoint_path.lower():
             logging.info("Loading GGUF model state_dict...")
             from .. import mz_gguf_loader
@@ -209,14 +176,6 @@ class T2VSynthMochiModel:
         self.vae_mean = torch.Tensor(vae_stats["mean"]).to(self.device)
         self.vae_std = torch.Tensor(vae_stats["std"]).to(self.device)
 
-    def get_packed_indices(self, y_mask, *, lT, lW, lH):
-        patch_size = 2
-        N = lT * lH * lW // (patch_size**2)
-        assert len(y_mask) == 1
-        packed_indices = compute_packed_indices(N, y_mask)
-        self.move_to_device_(packed_indices)
-        return packed_indices
-
     def move_to_device_(self, sample):
         if isinstance(sample, dict):
             for key in sample.keys():
@@ -227,7 +186,7 @@ class T2VSynthMochiModel:
         torch.manual_seed(args["seed"])
         torch.cuda.manual_seed(args["seed"])
 
-        generator = torch.Generator(device=self.device)
+        generator = torch.Generator(device=torch.device("cpu"))
         generator.manual_seed(args["seed"])
 
         num_frames = args["num_frames"]
@@ -259,14 +218,13 @@ class T2VSynthMochiModel:
         T = (num_frames - 1) // temporal_downsample + 1
         H = height // spatial_downsample
         W = width // spatial_downsample
-        latent_dims = dict(lT=T, lW=W, lH=H)
         
         z = torch.randn(
             (B, C, T, H, W),
-            device=self.device,
+            device=torch.device("cpu"),
             generator=generator,
             dtype=torch.float32,
-        )
+        ).to(self.device)
         if in_samples is not None:
             z = z * sigma_schedule[0] + (1 -sigma_schedule[0]) * in_samples.to(self.device)
 
@@ -277,14 +235,7 @@ class T2VSynthMochiModel:
         sample_null = {
             "y_mask": [args["negative_embeds"]["attention_mask"].to(self.device)],
             "y_feat": [args["negative_embeds"]["embeds"].to(self.device)]
-        }       
-
-        sample["packed_indices"] = self.get_packed_indices(
-            sample["y_mask"], **latent_dims
-        )
-        sample_null["packed_indices"] = self.get_packed_indices(
-            sample_null["y_mask"], **latent_dims
-        )
+        }
 
         self.dit.to(self.device)
         if hasattr(self.dit, "cublas_half_matmul") and self.dit.cublas_half_matmul:
@@ -292,7 +243,7 @@ class T2VSynthMochiModel:
         else:
             autocast_dtype = torch.bfloat16
 
-        def model_fn(*, z, sigma, cfg_scale):            
+        def model_fn(*, z, sigma, cfg_scale):
             nonlocal sample, sample_null
             if cfg_scale > 1.0:
                 out_cond = self.dit(z, sigma, **sample)
@@ -314,8 +265,7 @@ class T2VSynthMochiModel:
                     sigma=torch.full([B], sigma, device=z.device),
                     cfg_scale=cfg_schedule[i],
                 )
-                pred = pred.to(z)
-                z = z + dsigma * pred
+                z = z + dsigma * pred.to(z)
                 if callback is not None:
                     callback(i, z.detach()[0].permute(1,0,2,3), None, sample_steps)
                 else:

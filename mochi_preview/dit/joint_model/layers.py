@@ -130,8 +130,6 @@ class PatchEmbed(nn.Module):
             x = F.pad(x, (0, pad_w, 0, pad_h))
 
         x = rearrange(x, "B C T H W -> (B T) C H W", B=B, T=T)
-        #print("x",x.dtype, x.device)
-        #print(self.proj.weight.dtype, self.proj.weight.device)
         x = self.proj(x)
 
         # Flatten temporal and spatial dimensions.

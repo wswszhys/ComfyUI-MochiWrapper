@@ -473,6 +473,7 @@ class MochiSampler:
     CATEGORY = "MochiWrapper"
 
     def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames, cfg_schedule=None, opt_sigmas=None, samples=None):
+        mm.unload_all_models()
         mm.soft_empty_cache()
 
         if opt_sigmas is not None:
