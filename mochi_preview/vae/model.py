@@ -6,8 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-#from ..dit.joint_model.context_parallel import get_cp_rank_size
-#from ..vae.cp_conv import cp_pass_frames, gather_all_frames
 from .latent_dist import LatentDistribution
 
 def cast_tuple(t, length=1):

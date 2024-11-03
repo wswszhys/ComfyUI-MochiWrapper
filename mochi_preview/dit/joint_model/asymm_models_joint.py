@@ -584,6 +584,7 @@ class AsymmDiTJoint(nn.Module):
         y_mask: List[torch.Tensor],
         rope_cos: torch.Tensor = None,
         rope_sin: torch.Tensor = None,
+        packed_indices: Optional[dict] = None,
     ):
         """Forward pass of DiT.
 

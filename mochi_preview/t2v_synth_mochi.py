@@ -176,6 +176,10 @@ class T2VSynthMochiModel:
         self.vae_mean = torch.Tensor(vae_stats["mean"]).to(self.device)
         self.vae_std = torch.Tensor(vae_stats["std"]).to(self.device)
 
+    def get_packed_indices(self, y_mask, **latent_dims):
+        # temporary dummy func for compatibility
+        return []
+
     def move_to_device_(self, sample):
         if isinstance(sample, dict):
             for key in sample.keys():
