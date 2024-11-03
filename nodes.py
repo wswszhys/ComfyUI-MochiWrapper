@@ -59,7 +59,7 @@ class MochiSigmaSchedule:
     RETURN_NAMES = ("sigmas",)
     FUNCTION = "loadmodel"
     CATEGORY = "MochiWrapper"
-    DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
+    DESCRIPTION = "Sigma schedule to use with mochi wrapper sampler"
 
     def loadmodel(self, num_steps, threshold_noise, denoise, linear_steps=None):
         total_steps = num_steps
