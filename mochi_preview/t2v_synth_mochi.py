@@ -1,4 +1,3 @@
-import json
 from typing import Dict, List, Optional, Union
 
 #temporary patch to fix torch compile bug in Windows
@@ -35,7 +34,6 @@ except:
 import torch
 import torch.utils.data
 
-#from .dit.joint_model.context_parallel import get_cp_rank_size
 from tqdm import tqdm
 from comfy.utils import ProgressBar, load_torch_file
 import comfy.model_management as mm 
@@ -83,11 +81,11 @@ class T2VSynthMochiModel:
         *,
         device: torch.device,
         offload_device: torch.device,
-        vae_stats_path: str,
         dit_checkpoint_path: str,
         weight_dtype: torch.dtype = torch.float8_e4m3fn,
         fp8_fastmode: bool = False,
         attention_mode: str = "sdpa",
+        rms_norm_func: str = "default",
         compile_args: Optional[Dict] = None,
         cublas_ops: Optional[bool] = False,
     ):
@@ -117,6 +115,7 @@ class T2VSynthMochiModel:
                 t5_token_length=256,
                 rope_theta=10000.0,
                 attention_mode=attention_mode,
+                rms_norm_func=rms_norm_func,
             )
 
         params_to_keep = {"t_embedder", "x_embedder", "pos_frequencies", "t5", "norm"}
@@ -171,10 +170,6 @@ class T2VSynthMochiModel:
                 model.final_layer = torch.compile(model.final_layer, fullgraph=compile_args["fullgraph"], dynamic=False, backend=compile_args["backend"])        
 
         self.dit = model
-        
-        vae_stats = json.load(open(vae_stats_path))
-        self.vae_mean = torch.Tensor(vae_stats["mean"]).to(self.device)
-        self.vae_std = torch.Tensor(vae_stats["std"]).to(self.device)
 
     def get_packed_indices(self, y_mask, **latent_dims):
         # temporary dummy func for compatibility
@@ -233,8 +228,8 @@ class T2VSynthMochiModel:
             z = z * sigma_schedule[0] + (1 -sigma_schedule[0]) * in_samples.to(self.device)
 
         sample = {
-        "y_mask": [args["positive_embeds"]["attention_mask"].to(self.device)],
-        "y_feat": [args["positive_embeds"]["embeds"].to(self.device)]
+            "y_mask": [args["positive_embeds"]["attention_mask"].to(self.device)],
+            "y_feat": [args["positive_embeds"]["embeds"].to(self.device)]
         }
         sample_null = {
             "y_mask": [args["negative_embeds"]["attention_mask"].to(self.device)],

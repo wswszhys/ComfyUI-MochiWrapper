@@ -105,6 +105,7 @@ class DownloadAndLoadMochiModel:
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
                 "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
                 "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops for the GGUF models, for more info:'https://github.com/aredden/torch-cublas-hgemm'",}),
+                "rms_norm_func": (["default", "flash_attn_triton", "flash_attn", "apex"],{"tooltip": "RMSNorm function to use, flash_attn if available seems to be faster, apex untested",}),
             },
         }
 
@@ -114,7 +115,7 @@ class DownloadAndLoadMochiModel:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "Downloads and loads the selected Mochi model from Huggingface"
 
-    def loadmodel(self, model, vae, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False):
+    def loadmodel(self, model, vae, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False, rms_norm_func="default"):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -154,11 +155,11 @@ class DownloadAndLoadMochiModel:
         model = T2VSynthMochiModel(
             device=device,
             offload_device=offload_device,
-            vae_stats_path=os.path.join(script_directory, "configs", "vae_stats.json"),
             dit_checkpoint_path=model_path,
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
             attention_mode=attention_mode,
+            rms_norm_func=rms_norm_func,
             compile_args=compile_args,
             cublas_ops=cublas_ops
         )
@@ -201,6 +202,7 @@ class MochiModelLoader:
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
                 "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
                 "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops for the GGUF models, for more info:'https://github.com/aredden/torch-cublas-hgemm'",}),
+                "rms_norm_func": (["default", "flash_attn_triton", "flash_attn", "apex"],{"tooltip": "RMSNorm function to use, flash_attn if available seems to be faster, apex untested",}),
            
             },
         }
@@ -209,7 +211,7 @@ class MochiModelLoader:
     FUNCTION = "loadmodel"
     CATEGORY = "MochiWrapper"
 
-    def loadmodel(self, model_name, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False):
+    def loadmodel(self, model_name, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False, rms_norm_func="default"):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -226,6 +228,7 @@ class MochiModelLoader:
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
             attention_mode=attention_mode,
+            rms_norm_func=rms_norm_func,
             compile_args=compile_args,
             cublas_ops=cublas_ops
         )
@@ -749,10 +752,16 @@ class MochiImageEncode:
         from .mochi_preview.vae.model import apply_tiled
         B, H, W, C = images.shape
         
-        images = images.unsqueeze(0) * 2 - 1
-        images = rearrange(images, "t b h w c -> t c b h w")
-        images = images.to(device)
-        print(images.shape)
+        import torchvision.transforms as transforms
+        normalize = transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+        input_image_tensor = rearrange(images, 'b h w c -> b c h w')
+        input_image_tensor = normalize(input_image_tensor).unsqueeze(0)
+        input_image_tensor = rearrange(input_image_tensor, 'b t c h w -> b c t h w', t=B)
+        
+        #images = images.unsqueeze(0).sub_(0.5).div_(0.5)
+        #images = rearrange(input_image_tensor, "b c t h w -> t c b h w")
+        images = input_image_tensor.to(device)
+        
         encoder.to(device)
         print("images before encoding", images.shape)
         with torch.autocast(mm.get_autocast_device(device), dtype=encoder.dtype):

@@ -7,15 +7,15 @@ import torch.nn.functional as F
 from .layers import (
     FeedForward,
     PatchEmbed,
-    RMSNorm,
     TimestepEmbedder,
 )
 
+
 from .mod_rmsnorm import modulated_rmsnorm
-from .residual_tanh_gated_rmsnorm import (residual_tanh_gated_rmsnorm)
-from .rope_mixed import (compute_mixed_rotation, create_position_matrix)
+from .residual_tanh_gated_rmsnorm import residual_tanh_gated_rmsnorm
+from .rope_mixed import compute_mixed_rotation, create_position_matrix
 from .temporal_rope import apply_rotary_emb_qk_real
-from .utils import (pool_tokens, modulate)
+from .utils import pool_tokens, modulate
 
 try:
     from flash_attn import flash_attn_func
@@ -119,6 +119,7 @@ class AsymmetricAttention(nn.Module):
         softmax_scale: Optional[float] = None,
         device: Optional[torch.device] = None,
         attention_mode: str = "sdpa",
+        rms_norm_func: bool = False,
         
     ):
         super().__init__()
@@ -145,6 +146,28 @@ class AsymmetricAttention(nn.Module):
 
         # Query and key normalization for stability.
         assert qk_norm
+        if rms_norm_func == "flash_attn_triton": #use the same rms_norm_func
+            try:
+                from flash_attn.ops.triton.layer_norm import RMSNorm as FlashTritonRMSNorm #slightly faster
+                @torch.compiler.disable() #cause NaNs when compiled for some reason
+                class RMSNorm(FlashTritonRMSNorm):
+                    pass
+            except:
+                raise ImportError("Flash Triton RMSNorm not available.")
+        elif rms_norm_func == "flash_attn":
+            try:
+                from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm #slightly faster
+                @torch.compiler.disable() #cause NaNs when compiled for some reason
+                class RMSNorm(FlashRMSNorm):
+                    pass
+            except:
+                raise ImportError("Flash RMSNorm not available.")
+        elif rms_norm_func == "apex":
+            from apex.normalization import FusedRMSNorm as ApexRMSNorm
+            class RMSNorm(ApexRMSNorm):
+                pass
+        else:
+            from .layers import RMSNorm
         self.q_norm_x = RMSNorm(self.head_dim, device=device)
         self.k_norm_x = RMSNorm(self.head_dim, device=device)
         self.q_norm_y = RMSNorm(self.head_dim, device=device)
@@ -210,7 +233,6 @@ class AsymmetricAttention(nn.Module):
                 )
             return out
 
-    @torch.compiler.disable()
     def run_attention(
         self,
         q,
@@ -283,6 +305,7 @@ class AsymmetricJointBlock(nn.Module):
         update_y: bool = True,  # Whether to update text tokens in this block.
         device: Optional[torch.device] = None,
         attention_mode: str = "sdpa",
+        rms_norm_func: str = "default",
         **block_kwargs,
     ):
         super().__init__()
@@ -304,6 +327,7 @@ class AsymmetricJointBlock(nn.Module):
             update_y=update_y,
             device=device,
             attention_mode=attention_mode,
+            rms_norm_func=rms_norm_func,
             **block_kwargs,
         )
 
@@ -450,6 +474,7 @@ class AsymmDiTJoint(nn.Module):
         rope_theta: float = 10000.0,
         device: Optional[torch.device] = None,
         attention_mode: str = "sdpa",
+        rms_norm_func: str = "default",
         **block_kwargs,
     ):
         super().__init__()
@@ -518,6 +543,7 @@ class AsymmDiTJoint(nn.Module):
                 update_y=update_y,
                 device=device,
                 attention_mode=attention_mode,
+                rms_norm_func=rms_norm_func,
                 **block_kwargs,
             )
 
