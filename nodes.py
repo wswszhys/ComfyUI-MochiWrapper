@@ -181,7 +181,7 @@ class DownloadAndLoadMochiModel:
         vae_sd = load_torch_file(vae_path)
         if is_accelerate_available:
             for key in vae_sd:
-                set_module_tensor_to_device(vae, key, dtype=torch.float32, device=device, value=vae_sd[key])
+                set_module_tensor_to_device(vae, key, dtype=torch.bfloat16, device=offload_device, value=vae_sd[key])
         else:
             vae.load_state_dict(vae_sd, strict=True)
             vae.eval().to(torch.bfloat16).to("cpu")
