@@ -244,6 +244,7 @@ class MochiTorchCompileSettings:
                 "mode": (["default", "max-autotune", "max-autotune-no-cudagraphs", "reduce-overhead"], {"default": "default"}),
                 "compile_dit": ("BOOLEAN", {"default": True, "tooltip": "Compiles all transformer blocks"}),
                 "compile_final_layer": ("BOOLEAN", {"default": True, "tooltip": "Enable compiling final layer."}),
+                "dynamic": ("BOOLEAN", {"default": False, "tooltip": "Enable dynamic mode"}),
             },
         }
     RETURN_TYPES = ("MOCHICOMPILEARGS",)
@@ -252,7 +253,7 @@ class MochiTorchCompileSettings:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
 
-    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer):
+    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer, dynamic):
 
         compile_args = {
             "backend": backend,
@@ -260,6 +261,7 @@ class MochiTorchCompileSettings:
             "mode": mode,
             "compile_dit": compile_dit,
             "compile_final_layer": compile_final_layer,
+            "dynamic": dynamic,
         }
 
         return (compile_args, )

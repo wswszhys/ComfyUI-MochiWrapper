@@ -182,9 +182,9 @@ class T2VSynthMochiModel:
         if compile_args is not None:
             if compile_args["compile_dit"]:
                 for i, block in enumerate(model.blocks):
-                    model.blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=False, backend=compile_args["backend"])
+                    model.blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"])
             if compile_args["compile_final_layer"]:
-                model.final_layer = torch.compile(model.final_layer, fullgraph=compile_args["fullgraph"], dynamic=False, backend=compile_args["backend"])        
+                model.final_layer = torch.compile(model.final_layer, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"])        
 
         self.dit = model
 
