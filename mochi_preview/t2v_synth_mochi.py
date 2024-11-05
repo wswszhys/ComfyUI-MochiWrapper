@@ -1,5 +1,5 @@
-import json
 from typing import Dict, List, Optional, Union
+from einops import rearrange
 
 #temporary patch to fix torch compile bug in Windows
 def patched_write_atomic(
@@ -33,11 +33,8 @@ except:
     pass
 
 import torch
-import torch.nn.functional as F
 import torch.utils.data
-from einops import rearrange, repeat
 
-#from .dit.joint_model.context_parallel import get_cp_rank_size
 from tqdm import tqdm
 from comfy.utils import ProgressBar, load_torch_file
 import comfy.model_management as mm 
@@ -95,59 +92,17 @@ def unnormalize_latents(
     assert z.size(1) == mean.size(0) == std.size(0)
     return z * std.to(z) + mean.to(z)
 
-
-
-def compute_packed_indices(
-    N: int,
-    text_mask: List[torch.Tensor],
-) -> Dict[str, torch.Tensor]:
-    """
-    Based on https://github.com/Dao-AILab/flash-attention/blob/765741c1eeb86c96ee71a3291ad6968cfbf4e4a1/flash_attn/bert_padding.py#L60-L80
-
-    Args:
-        N: Number of visual tokens.
-        text_mask: (B, L) List of boolean tensor indicating which text tokens are not padding.
-
-    Returns:
-        packed_indices: Dict with keys for Flash Attention:
-            - valid_token_indices_kv: up to (B * (N + L),) tensor of valid token indices (non-padding)
-                                   in the packed sequence.
-            - cu_seqlens_kv: (B + 1,) tensor of cumulative sequence lengths in the packed sequence.
-            - max_seqlen_in_batch_kv: int of the maximum sequence length in the batch.
-    """
-    # Create an expanded token mask saying which tokens are valid across both visual and text tokens.
-    assert N > 0 and len(text_mask) == 1
-    text_mask = text_mask[0]
-
-    mask = F.pad(text_mask, (N, 0), value=True)  # (B, N + L)
-    seqlens_in_batch = mask.sum(dim=-1, dtype=torch.int32)  # (B,)
-    valid_token_indices = torch.nonzero(
-        mask.flatten(), as_tuple=False
-    ).flatten()  # up to (B * (N + L),)
-
-    assert valid_token_indices.size(0) >= text_mask.size(0) * N  # At least (B * N,)
-    cu_seqlens = F.pad(
-        torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0)
-    )
-    max_seqlen_in_batch = seqlens_in_batch.max().item()
-
-    return {
-        "cu_seqlens_kv": cu_seqlens,
-        "max_seqlen_in_batch_kv": max_seqlen_in_batch,
-        "valid_token_indices_kv": valid_token_indices,
-    }
-
 class T2VSynthMochiModel:
     def __init__(
         self,
         *,
         device: torch.device,
         offload_device: torch.device,
-        vae_stats_path: str,
         dit_checkpoint_path: str,
         weight_dtype: torch.dtype = torch.float8_e4m3fn,
         fp8_fastmode: bool = False,
         attention_mode: str = "sdpa",
+        rms_norm_func: str = "default",
         compile_args: Optional[Dict] = None,
         cublas_ops: Optional[bool] = False,
     ):
@@ -177,11 +132,23 @@ class T2VSynthMochiModel:
                 t5_token_length=256,
                 rope_theta=10000.0,
                 attention_mode=attention_mode,
+                rms_norm_func=rms_norm_func,
             )
 
         params_to_keep = {"t_embedder", "x_embedder", "pos_frequencies", "t5", "norm"}
         logging.info(f"Loading model state_dict from {dit_checkpoint_path}...")
         dit_sd = load_torch_file(dit_checkpoint_path)
+
+        #comfy format
+        prefix = "model.diffusion_model."
+        first_key = next(iter(dit_sd), None)
+        if first_key and first_key.startswith(prefix):
+            new_dit_sd = {
+                key[len(prefix):] if key.startswith(prefix) else key: value
+                for key, value in dit_sd.items()
+            }
+            dit_sd = new_dit_sd
+                
         if "gguf" in dit_checkpoint_path.lower():
             logging.info("Loading GGUF model state_dict...")
             from .. import mz_gguf_loader
@@ -220,18 +187,10 @@ class T2VSynthMochiModel:
                 model.final_layer = torch.compile(model.final_layer, fullgraph=compile_args["fullgraph"], dynamic=False, backend=compile_args["backend"])        
 
         self.dit = model
-        
-        vae_stats = json.load(open(vae_stats_path))
-        self.vae_mean = torch.Tensor(vae_stats["mean"]).to(self.device)
-        self.vae_std = torch.Tensor(vae_stats["std"]).to(self.device)
 
-    def get_packed_indices(self, y_mask, *, lT, lW, lH):
-        patch_size = 2
-        N = lT * lH * lW // (patch_size**2)
-        assert len(y_mask) == 1
-        packed_indices = compute_packed_indices(N, y_mask)
-        self.move_to_device_(packed_indices)
-        return packed_indices
+    def get_packed_indices(self, y_mask, **latent_dims):
+        # temporary dummy func for compatibility
+        return []
 
     def move_to_device_(self, sample):
         if isinstance(sample, dict):
@@ -243,7 +202,7 @@ class T2VSynthMochiModel:
         torch.manual_seed(args["seed"])
         torch.cuda.manual_seed(args["seed"])
 
-        generator = torch.Generator(device=self.device)
+        generator = torch.Generator(device=torch.device("cpu"))
         generator.manual_seed(args["seed"])
 
         num_frames = args["num_frames"]
@@ -275,50 +234,49 @@ class T2VSynthMochiModel:
         T = (num_frames - 1) // temporal_downsample + 1
         H = height // spatial_downsample
         W = width // spatial_downsample
-        latent_dims = dict(lT=T, lW=W, lH=H)
         
         z = torch.randn(
             (B, C, T, H, W),
-            device=self.device,
+            device=torch.device("cpu"),
             generator=generator,
             dtype=torch.float32,
-        )
+        ).to(self.device)
         if in_samples is not None:
             z = z * sigma_schedule[0] + (1 -sigma_schedule[0]) * in_samples.to(self.device)
 
         sample = {
-        "y_mask": [args["positive_embeds"]["attention_mask"].to(self.device)],
-        "y_feat": [args["positive_embeds"]["embeds"].to(self.device)]
+            "y_mask": [args["positive_embeds"]["attention_mask"].to(self.device)],
+            "y_feat": [args["positive_embeds"]["embeds"].to(self.device)],
+            "fastercache": args["fastercache"] if args["fastercache"] is not None else None
         }
         sample_null = {
             "y_mask": [args["negative_embeds"]["attention_mask"].to(self.device)],
-            "y_feat": [args["negative_embeds"]["embeds"].to(self.device)]
-        }       
+            "y_feat": [args["negative_embeds"]["embeds"].to(self.device)],
+            "fastercache": args["fastercache"] if args["fastercache"] is not None else None
+        }
 
-        sample["packed_indices"] = self.get_packed_indices(
-            sample["y_mask"], **latent_dims
-        )
-        sample_null["packed_indices"] = self.get_packed_indices(
-            sample_null["y_mask"], **latent_dims
-        )
-        self.use_fastercache = True
+        if args["fastercache"]:
+            self.fastercache_start_step = args["fastercache"]["start_step"]
+            self.fastercache_lf_step = args["fastercache"]["lf_step"]
+            self.fastercache_hf_step = args["fastercache"]["hf_step"]
+        else:
+            self.fastercache_start_step = 1000
         self.fastercache_counter = 0
-        self.fastercache_start_step = 15
-        self.fastercache_lf_step = 40
-        self.fastercache_hf_step = 30
 
         def model_fn(*, z, sigma, cfg_scale):  
             nonlocal sample, sample_null
-            if self.use_fastercache:
+            if args["fastercache"]:
                 self.fastercache_counter+=1
             if self.fastercache_counter >= self.fastercache_start_step + 3 and self.fastercache_counter % 5 !=0:
-                out_cond = self.dit(z, sigma,self.fastercache_counter, self.fastercache_start_step, **sample)
+                out_cond = self.dit(
+                    z, 
+                    sigma,
+                    self.fastercache_counter,
+                    **sample)
                 
                 (bb, cc, tt, hh, ww) = out_cond.shape
                 cond = rearrange(out_cond, "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
                 lf_c, hf_c = fft(cond.float())
-                #lf_step = 40
-                #hf_step = 30
                 if self.fastercache_counter <= self.fastercache_lf_step:
                     self.delta_lf = self.delta_lf * 1.1
                 if self.fastercache_counter >= self.fastercache_hf_step:
@@ -334,12 +292,19 @@ class T2VSynthMochiModel:
                 
                 return recovered_uncond + cfg_scale * (out_cond - recovered_uncond)
             else:
-                out_cond = self.dit(z, sigma, self.fastercache_counter, self.fastercache_start_step,**sample)
-                out_uncond = self.dit(z, sigma, self.fastercache_counter, self.fastercache_start_step,**sample_null)
-                #print("out_cond.shape",out_cond.shape) #([1, 12, 3, 60, 106])
+                out_cond = self.dit(
+                    z, 
+                    sigma, 
+                    self.fastercache_counter, 
+                    **sample)
+                
+                out_uncond = self.dit(
+                    z, 
+                    sigma, 
+                    self.fastercache_counter, 
+                    **sample_null)
 
                 if self.fastercache_counter >= self.fastercache_start_step + 1:
-                    
                     (bb, cc, tt, hh, ww) = out_cond.shape
                     cond = rearrange(out_cond.float(), "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
                     uncond = rearrange(out_uncond.float(), "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
@@ -352,7 +317,6 @@ class T2VSynthMochiModel:
                     
                 return out_uncond + cfg_scale * (out_cond - out_uncond)
                 
-        
         comfy_pbar = ProgressBar(sample_steps)
 
         if hasattr(self.dit, "cublas_half_matmul") and self.dit.cublas_half_matmul:
@@ -373,13 +337,19 @@ class T2VSynthMochiModel:
                     sigma=torch.full([B], sigma, device=z.device),
                     cfg_scale=cfg_schedule[i],
                 )
-                pred = pred.to(z)
-                z = z + dsigma * pred
+                z = z + dsigma * pred.to(z)
                 if callback is not None:
                     callback(i, z.detach()[0].permute(1,0,2,3), None, sample_steps)
                 else:
                     comfy_pbar.update(1)
+
+        if args["fastercache"] is not None:
+            for block in self.dit.blocks:
+                if (hasattr, block, "cached_x_attention") and block.cached_x_attention is not None:
+                    block.cached_x_attention = None
+                    block.cached_y_attention = None
        
         self.dit.to(self.offload_device)
+        mm.soft_empty_cache()
         logging.info(f"samples shape: {z.shape}")
         return z

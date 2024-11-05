@@ -446,6 +446,36 @@ class MochiTextEncode:
         }
         return (t5_embeds, clip,)
     
+#region FasterCache
+class MochiFasterCache:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "start_step": ("INT", {"default": 10, "min": 0, "max": 1024, "step": 1, "tooltip": "The step to start caching, sigma schedule should be adjusted accordingly"}),
+                "hf_step": ("INT", {"default": 22, "min": 0, "max": 1024, "step": 1}),
+                "lf_step": ("INT", {"default": 28, "min": 0, "max": 1024, "step": 1}),
+                "cache_device": (["main_device", "offload_device"], {"default": "main_device", "tooltip": "The device to use for the cache, main_device is on GPU and uses a lot of VRAM"}),
+            },
+        }
+
+    RETURN_TYPES = ("FASTERCACHEARGS",)
+    RETURN_NAMES = ("fastercache", )
+    FUNCTION = "args"
+    CATEGORY = "CogVideoWrapper"
+    DESCRIPTION = "FasterCache (https://github.com/Vchitect/FasterCache) settings for the MochiWrapper"
+
+    def args(self, start_step, hf_step, lf_step, cache_device):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        fastercache = {
+            "start_step" : start_step,
+            "hf_step" : hf_step,
+            "lf_step" : lf_step,
+            "cache_device" : device if cache_device == "main_device" else offload_device
+        }
+        return (fastercache,)
+     
 #region Sampler
 class MochiSampler:
     @classmethod
@@ -466,6 +496,7 @@ class MochiSampler:
                 "cfg_schedule": ("FLOAT", {"forceInput": True, "tooltip": "Override cfg schedule with a list of ints"}),
                 "opt_sigmas": ("SIGMAS", {"tooltip": "Override sigma schedule and steps"}),
                 "samples": ("LATENT", ),
+                "fastercache": ("FASTERCACHEARGS", {"tooltip": "Optional FasterCache settings"}),
             }
         }
 
@@ -474,7 +505,7 @@ class MochiSampler:
     FUNCTION = "process"
     CATEGORY = "MochiWrapper"
 
-    def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames, cfg_schedule=None, opt_sigmas=None, samples=None):
+    def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames, cfg_schedule=None, opt_sigmas=None, samples=None, fastercache=None):
         mm.unload_all_models()
         mm.soft_empty_cache()
 
@@ -517,6 +548,7 @@ class MochiSampler:
             "negative_embeds": negative,
             "seed": seed,
             "samples": samples["samples"] if samples is not None else None,
+            "fastercache": fastercache
         }
         latents = model.run(args)
     
@@ -848,7 +880,8 @@ NODE_CLASS_MAPPINGS = {
     "MochiTorchCompileSettings": MochiTorchCompileSettings,
     "MochiImageEncode": MochiImageEncode,
     "MochiLatentPreview": MochiLatentPreview,
-    "MochiSigmaSchedule": MochiSigmaSchedule
+    "MochiSigmaSchedule": MochiSigmaSchedule,
+    "MochiFasterCache": MochiFasterCache
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadAndLoadMochiModel": "(Down)load Mochi Model",
@@ -862,5 +895,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MochiTorchCompileSettings": "Mochi Torch Compile Settings",
     "MochiImageEncode": "Mochi Image Encode",
     "MochiLatentPreview": "Mochi Latent Preview",
-    "MochiSigmaSchedule": "Mochi Sigma Schedule"
+    "MochiSigmaSchedule": "Mochi Sigma Schedule",
+    "MochiFasterCache": "Mochi Faster Cache"
     }
