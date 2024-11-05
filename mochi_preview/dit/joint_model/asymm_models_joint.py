@@ -396,7 +396,6 @@ class AsymmetricJointBlock(nn.Module):
         B = x.shape[0]
         #print("x", x.shape) #([1, 9540, 3072])
         if fastercache_counter >= fastercache_start_step + 3 and fastercache_counter%3!=0 and self.cached_x_attention[-1].shape[0] >= B:
-            print("using fastercache")
             x_attn = (
                 self.cached_x_attention[1][:B] + 
                 (self.cached_x_attention[1][:B] - self.cached_x_attention[0][:B]) 
