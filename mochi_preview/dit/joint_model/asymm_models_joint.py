@@ -643,7 +643,7 @@ class AsymmDiTJoint(nn.Module):
         y_mask: List[torch.Tensor],
         rope_cos: torch.Tensor = None,
         rope_sin: torch.Tensor = None,
-        fastercache: Optional[Dict[str, torch.Tensor]] = None,
+        fastercache: Optional[Dict] = None,
         fastercache_counter: Optional[int]=0,
     ):
         """Forward pass of DiT.
