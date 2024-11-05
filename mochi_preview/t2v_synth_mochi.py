@@ -72,25 +72,6 @@ def fft(tensor):
     high_freq_fft = tensor_fft_shifted * high_freq_mask
 
     return low_freq_fft, high_freq_fft
-def unnormalize_latents(
-    z: torch.Tensor,
-    mean: torch.Tensor,
-    std: torch.Tensor,
-) -> torch.Tensor:
-    """Unnormalize latents. Useful for decoding DiT samples.
-
-    Args:
-        z (torch.Tensor): [B, C_z, T_z, H_z, W_z], float
-
-    Returns:
-        torch.Tensor: [B, C_z, T_z, H_z, W_z], float
-    """
-    mean = mean[:, None, None, None]
-    std = std[:, None, None, None]
-
-    assert z.ndim == 5
-    assert z.size(1) == mean.size(0) == std.size(0)
-    return z * std.to(z) + mean.to(z)
 
 class T2VSynthMochiModel:
     def __init__(
@@ -188,10 +169,6 @@ class T2VSynthMochiModel:
 
         self.dit = model
 
-    def get_packed_indices(self, y_mask, **latent_dims):
-        # temporary dummy func for compatibility
-        return []
-
     def move_to_device_(self, sample):
         if isinstance(sample, dict):
             for key in sample.keys():
@@ -265,57 +242,66 @@ class T2VSynthMochiModel:
 
         def model_fn(*, z, sigma, cfg_scale):  
             nonlocal sample, sample_null
-            if args["fastercache"]:
-                self.fastercache_counter+=1
-            if self.fastercache_counter >= self.fastercache_start_step + 3 and self.fastercache_counter % 5 !=0:
-                out_cond = self.dit(
-                    z, 
-                    sigma,
-                    self.fastercache_counter,
-                    **sample)
-                
-                (bb, cc, tt, hh, ww) = out_cond.shape
-                cond = rearrange(out_cond, "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
-                lf_c, hf_c = fft(cond.float())
-                if self.fastercache_counter <= self.fastercache_lf_step:
-                    self.delta_lf = self.delta_lf * 1.1
-                if self.fastercache_counter >= self.fastercache_hf_step:
-                    self.delta_hf = self.delta_hf * 1.1
-
-                new_hf_uc = self.delta_hf + hf_c
-                new_lf_uc = self.delta_lf + lf_c
-
-                combine_uc = new_lf_uc + new_hf_uc
-                combined_fft = torch.fft.ifftshift(combine_uc)
-                recovered_uncond = torch.fft.ifft2(combined_fft).real
-                recovered_uncond = rearrange(recovered_uncond.to(out_cond.dtype), "(B T) C H W -> B C T H W", B=bb, C=cc, T=tt, H=hh, W=ww)
-                
-                return recovered_uncond + cfg_scale * (out_cond - recovered_uncond)
-            else:
-                out_cond = self.dit(
-                    z, 
-                    sigma, 
-                    self.fastercache_counter, 
-                    **sample)
-                
-                out_uncond = self.dit(
-                    z, 
-                    sigma, 
-                    self.fastercache_counter, 
-                    **sample_null)
-
-                if self.fastercache_counter >= self.fastercache_start_step + 1:
-                    (bb, cc, tt, hh, ww) = out_cond.shape
-                    cond = rearrange(out_cond.float(), "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
-                    uncond = rearrange(out_uncond.float(), "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
-
-                    lf_c, hf_c = fft(cond)
-                    lf_uc, hf_uc = fft(uncond)
-
-                    self.delta_lf = lf_uc - lf_c
-                    self.delta_hf = hf_uc - hf_c
+            if cfg_scale != 1.0:
+                if args["fastercache"]:
+                    self.fastercache_counter+=1
+                if self.fastercache_counter >= self.fastercache_start_step + 3 and self.fastercache_counter % 5 !=0:
+                    out_cond = self.dit(
+                        z, 
+                        sigma,
+                        self.fastercache_counter,
+                        **sample)
                     
-                return out_uncond + cfg_scale * (out_cond - out_uncond)
+                    (bb, cc, tt, hh, ww) = out_cond.shape
+                    cond = rearrange(out_cond, "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
+                    lf_c, hf_c = fft(cond.float())
+                    if self.fastercache_counter <= self.fastercache_lf_step:
+                        self.delta_lf = self.delta_lf * 1.1
+                    if self.fastercache_counter >= self.fastercache_hf_step:
+                        self.delta_hf = self.delta_hf * 1.1
+
+                    new_hf_uc = self.delta_hf + hf_c
+                    new_lf_uc = self.delta_lf + lf_c
+
+                    combine_uc = new_lf_uc + new_hf_uc
+                    combined_fft = torch.fft.ifftshift(combine_uc)
+                    recovered_uncond = torch.fft.ifft2(combined_fft).real
+                    recovered_uncond = rearrange(recovered_uncond.to(out_cond.dtype), "(B T) C H W -> B C T H W", B=bb, C=cc, T=tt, H=hh, W=ww)
+                    
+                    return recovered_uncond + cfg_scale * (out_cond - recovered_uncond)
+                else:
+                    out_cond = self.dit(
+                        z, 
+                        sigma, 
+                        self.fastercache_counter, 
+                        **sample)
+                    
+                    out_uncond = self.dit(
+                        z, 
+                        sigma, 
+                        self.fastercache_counter, 
+                        **sample_null)
+
+                    if self.fastercache_counter >= self.fastercache_start_step + 1:
+                        (bb, cc, tt, hh, ww) = out_cond.shape
+                        cond = rearrange(out_cond.float(), "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
+                        uncond = rearrange(out_uncond.float(), "B C T H W -> (B T) C H W", B=bb, C=cc, T=tt, H=hh, W=ww)
+
+                        lf_c, hf_c = fft(cond)
+                        lf_uc, hf_uc = fft(uncond)
+
+                        self.delta_lf = lf_uc - lf_c
+                        self.delta_hf = hf_uc - hf_c
+                        
+                    return out_uncond + cfg_scale * (out_cond - out_uncond)
+            else: #handle cfg 1.0
+                out_cond = self.dit(
+                        z, 
+                        sigma, 
+                        self.fastercache_counter, 
+                        **sample)
+                return out_cond
+
                 
         comfy_pbar = ProgressBar(sample_steps)
 

@@ -146,7 +146,7 @@ class AsymmetricAttention(nn.Module):
         self.qkv_y = nn.Linear(dim_y, 3 * dim_x, bias=qkv_bias, device=device)
 
         # Query and key normalization for stability.
-        assert qk_norm
+        #assert qk_norm
         if rms_norm_func == "flash_attn_triton": #use the same rms_norm_func
             try:
                 from flash_attn.ops.triton.layer_norm import RMSNorm as FlashTritonRMSNorm #slightly faster
@@ -338,7 +338,7 @@ class AsymmetricJointBlock(nn.Module):
 
         # MLP.
         mlp_hidden_dim_x = int(hidden_size_x * mlp_ratio_x)
-        assert mlp_hidden_dim_x == int(1536 * 8)
+        #assert mlp_hidden_dim_x == int(1536 * 8)
         self.mlp_x = FeedForward(
             in_features=hidden_size_x,
             hidden_size=mlp_hidden_dim_x,
@@ -422,7 +422,7 @@ class AsymmetricJointBlock(nn.Module):
                 self.cached_x_attention[-1].copy_(x_attn.to(fastercache_device))
                 self.cached_y_attention[-1].copy_(y_attn.to(fastercache_device))
 
-        assert x_attn.size(1) == N
+        #assert x_attn.size(1) == N
         x = residual_tanh_gated_rmsnorm(x, x_attn, gate_msa_x)
         if self.update_y:
             y = residual_tanh_gated_rmsnorm(y, y_attn, gate_msa_y)
@@ -606,7 +606,7 @@ class AsymmDiTJoint(nn.Module):
         T, H, W = x.shape[-3:]
         pH, pW = H // self.patch_size, W // self.patch_size
         x = self.embed_x(x)  # (B, N, D), where N = T * H * W / patch_size ** 2
-        assert x.ndim == 3
+        #assert x.ndim == 3
 
         # Construct position array of size [N, 3].
         # pos[:, 0] is the frame index for each location,
@@ -614,7 +614,7 @@ class AsymmDiTJoint(nn.Module):
         # pos[:, 2] is the column index for each location.
         pH, pW = H // self.patch_size, W // self.patch_size
         N = T * pH * pW
-        assert x.size(1) == N
+        #assert x.size(1) == N
         pos = create_position_matrix(T, pH=pH, pW=pW, device=x.device, dtype=torch.float32)  # (N, 3)
         rope_cos, rope_sin = compute_mixed_rotation(freqs=self.pos_frequencies, pos=pos)  # Each are (N, num_heads, dim // 2)
 
