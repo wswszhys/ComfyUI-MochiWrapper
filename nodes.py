@@ -223,7 +223,6 @@ class MochiModelLoader:
         model = T2VSynthMochiModel(
             device=device,
             offload_device=offload_device,
-            vae_stats_path=os.path.join(script_directory, "configs", "vae_stats.json"),
             dit_checkpoint_path=model_path,
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
