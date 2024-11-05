@@ -639,12 +639,12 @@ class AsymmDiTJoint(nn.Module):
         self,
         x: torch.Tensor,
         sigma: torch.Tensor,
-        fastercache_counter: int,
         y_feat: List[torch.Tensor],
         y_mask: List[torch.Tensor],
         rope_cos: torch.Tensor = None,
         rope_sin: torch.Tensor = None,
         fastercache: Optional[Dict[str, torch.Tensor]] = None,
+        fastercache_counter: Optional[int]=0,
     ):
         """Forward pass of DiT.
 
@@ -671,6 +671,7 @@ class AsymmDiTJoint(nn.Module):
         else:
             fastercache_start_step = 1000
             fastercache_device = None
+        #print(fastercache_counter)
         
         for i, block in enumerate(self.blocks):
             x, y_feat = block(
