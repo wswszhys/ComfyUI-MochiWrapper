@@ -169,16 +169,14 @@ class AsymmetricAttention(nn.Module):
                 pass
         else:
             from .layers import RMSNorm
-        if rms_norm_func == "apex":
-            self.q_norm_x = RMSNorm(self.head_dim)
-            self.k_norm_x = RMSNorm(self.head_dim)
-            self.q_norm_y = RMSNorm(self.head_dim)
-            self.k_norm_y = RMSNorm(self.head_dim)
-        else:
-            self.q_norm_x = RMSNorm(self.head_dim, device=device)
-            self.k_norm_x = RMSNorm(self.head_dim, device=device)
-            self.q_norm_y = RMSNorm(self.head_dim, device=device)
-            self.k_norm_y = RMSNorm(self.head_dim, device=device)
+        norm_kwargs = {}
+        if rms_norm_func != "apex":
+            norm_kwargs['device'] = device
+
+        self.q_norm_x = RMSNorm(self.head_dim, **norm_kwargs)
+        self.k_norm_x = RMSNorm(self.head_dim, **norm_kwargs)
+        self.q_norm_y = RMSNorm(self.head_dim, **norm_kwargs)
+        self.k_norm_y = RMSNorm(self.head_dim, **norm_kwargs)
 
         # Output layers. y features go back down from dim_x -> dim_y.
         self.proj_x = nn.Linear(dim_x, dim_x, bias=out_bias, device=device)
