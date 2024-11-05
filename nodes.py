@@ -463,7 +463,7 @@ class MochiFasterCache:
     RETURN_NAMES = ("fastercache", )
     FUNCTION = "args"
     CATEGORY = "CogVideoWrapper"
-    DESCRIPTION = "FasterCache (https://github.com/Vchitect/FasterCache) settings for the MochiWrapper"
+    DESCRIPTION = "FasterCache (https://github.com/Vchitect/FasterCache) settings for the MochiWrapper, increases speed of sampling with cost of memory use and quality"
 
     def args(self, start_step, hf_step, lf_step, cache_device):
         device = mm.get_torch_device()
