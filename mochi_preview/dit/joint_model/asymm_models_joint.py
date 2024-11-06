@@ -165,6 +165,7 @@ class AsymmetricAttention(nn.Module):
                 raise ImportError("Flash RMSNorm not available.")
         elif rms_norm_func == "apex":
             from apex.normalization import FusedRMSNorm as ApexRMSNorm
+            @torch.compiler.disable()
             class RMSNorm(ApexRMSNorm):
                 pass
         else:
@@ -237,7 +238,6 @@ class AsymmetricAttention(nn.Module):
                 skip_reshape=True
                 )
             return out
-
     def run_attention(
         self,
         q,

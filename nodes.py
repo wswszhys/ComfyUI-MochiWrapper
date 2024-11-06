@@ -247,6 +247,7 @@ class MochiTorchCompileSettings:
                 "compile_dit": ("BOOLEAN", {"default": True, "tooltip": "Compiles all transformer blocks"}),
                 "compile_final_layer": ("BOOLEAN", {"default": True, "tooltip": "Enable compiling final layer."}),
                 "dynamic": ("BOOLEAN", {"default": False, "tooltip": "Enable dynamic mode"}),
+                "dynamo_cache_size_limit": ("INT", {"default": 64, "min": 0, "max": 1024, "step": 1, "tooltip": "torch._dynamo.config.cache_size_limit"}),
             },
         }
     RETURN_TYPES = ("MOCHICOMPILEARGS",)
@@ -255,7 +256,7 @@ class MochiTorchCompileSettings:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
 
-    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer, dynamic):
+    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer, dynamic, dynamo_cache_size_limit):
 
         compile_args = {
             "backend": backend,
@@ -264,6 +265,7 @@ class MochiTorchCompileSettings:
             "compile_dit": compile_dit,
             "compile_final_layer": compile_final_layer,
             "dynamic": dynamic,
+            "dynamo_cache_size_limit": dynamo_cache_size_limit,
         }
 
         return (compile_args, )

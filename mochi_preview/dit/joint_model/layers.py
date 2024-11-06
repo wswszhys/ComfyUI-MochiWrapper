@@ -140,7 +140,7 @@ class PatchEmbed(nn.Module):
         x = self.norm(x)
         return x
 
-
+@torch.compiler.disable()
 class RMSNorm(torch.nn.Module):
     def __init__(self, hidden_size, eps=1e-5, device=None):
         super().__init__()
