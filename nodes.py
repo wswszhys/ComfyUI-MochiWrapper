@@ -1,7 +1,4 @@
 import os
-# import torch._dynamo
-# torch._dynamo.config.suppress_errors = True
-
 import torch
 import folder_paths
 import comfy.model_management as mm
@@ -105,6 +102,7 @@ class DownloadAndLoadMochiModel:
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
                 "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
                 "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops for the GGUF models, for more info:'https://github.com/aredden/torch-cublas-hgemm'",}),
+                "rms_norm_func": (["default", "flash_attn_triton", "flash_attn", "apex"],{"tooltip": "RMSNorm function to use, flash_attn if available seems to be faster, apex untested",}),
             },
         }
 
@@ -114,7 +112,7 @@ class DownloadAndLoadMochiModel:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "Downloads and loads the selected Mochi model from Huggingface"
 
-    def loadmodel(self, model, vae, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False):
+    def loadmodel(self, model, vae, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False, rms_norm_func="default"):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -154,11 +152,11 @@ class DownloadAndLoadMochiModel:
         model = T2VSynthMochiModel(
             device=device,
             offload_device=offload_device,
-            vae_stats_path=os.path.join(script_directory, "configs", "vae_stats.json"),
             dit_checkpoint_path=model_path,
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
             attention_mode=attention_mode,
+            rms_norm_func=rms_norm_func,
             compile_args=compile_args,
             cublas_ops=cublas_ops
         )
@@ -180,7 +178,7 @@ class DownloadAndLoadMochiModel:
         vae_sd = load_torch_file(vae_path)
         if is_accelerate_available:
             for key in vae_sd:
-                set_module_tensor_to_device(vae, key, dtype=torch.float32, device=device, value=vae_sd[key])
+                set_module_tensor_to_device(vae, key, dtype=torch.bfloat16, device=offload_device, value=vae_sd[key])
         else:
             vae.load_state_dict(vae_sd, strict=True)
             vae.eval().to(torch.bfloat16).to("cpu")
@@ -201,6 +199,7 @@ class MochiModelLoader:
                 "trigger": ("CONDITIONING", {"tooltip": "Dummy input for forcing execution order",}),
                 "compile_args": ("MOCHICOMPILEARGS", {"tooltip": "Optional torch.compile arguments",}),
                 "cublas_ops": ("BOOLEAN", {"tooltip": "tested on 4090, unsure of gpu requirements, enables faster linear ops for the GGUF models, for more info:'https://github.com/aredden/torch-cublas-hgemm'",}),
+                "rms_norm_func": (["default", "flash_attn_triton", "flash_attn", "apex"],{"tooltip": "RMSNorm function to use, flash_attn if available seems to be faster, apex untested",}),
            
             },
         }
@@ -209,7 +208,7 @@ class MochiModelLoader:
     FUNCTION = "loadmodel"
     CATEGORY = "MochiWrapper"
 
-    def loadmodel(self, model_name, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False):
+    def loadmodel(self, model_name, precision, attention_mode, trigger=None, compile_args=None, cublas_ops=False, rms_norm_func="default"):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -221,11 +220,11 @@ class MochiModelLoader:
         model = T2VSynthMochiModel(
             device=device,
             offload_device=offload_device,
-            vae_stats_path=os.path.join(script_directory, "configs", "vae_stats.json"),
             dit_checkpoint_path=model_path,
             weight_dtype=dtype,
             fp8_fastmode = True if precision == "fp8_e4m3fn_fast" else False,
             attention_mode=attention_mode,
+            rms_norm_func=rms_norm_func,
             compile_args=compile_args,
             cublas_ops=cublas_ops
         )
@@ -242,6 +241,7 @@ class MochiTorchCompileSettings:
                 "mode": (["default", "max-autotune", "max-autotune-no-cudagraphs", "reduce-overhead"], {"default": "default"}),
                 "compile_dit": ("BOOLEAN", {"default": True, "tooltip": "Compiles all transformer blocks"}),
                 "compile_final_layer": ("BOOLEAN", {"default": True, "tooltip": "Enable compiling final layer."}),
+                "dynamic": ("BOOLEAN", {"default": False, "tooltip": "Enable dynamic mode"}),
             },
         }
     RETURN_TYPES = ("MOCHICOMPILEARGS",)
@@ -250,7 +250,7 @@ class MochiTorchCompileSettings:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
 
-    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer):
+    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer, dynamic):
 
         compile_args = {
             "backend": backend,
@@ -258,6 +258,7 @@ class MochiTorchCompileSettings:
             "mode": mode,
             "compile_dit": compile_dit,
             "compile_final_layer": compile_final_layer,
+            "dynamic": dynamic,
         }
 
         return (compile_args, )
@@ -444,6 +445,36 @@ class MochiTextEncode:
         }
         return (t5_embeds, clip,)
     
+#region FasterCache
+class MochiFasterCache:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "start_step": ("INT", {"default": 10, "min": 0, "max": 1024, "step": 1, "tooltip": "The step to start caching, sigma schedule should be adjusted accordingly"}),
+                "hf_step": ("INT", {"default": 22, "min": 0, "max": 1024, "step": 1}),
+                "lf_step": ("INT", {"default": 28, "min": 0, "max": 1024, "step": 1}),
+                "cache_device": (["main_device", "offload_device"], {"default": "main_device", "tooltip": "The device to use for the cache, main_device is on GPU and uses a lot of VRAM"}),
+            },
+        }
+
+    RETURN_TYPES = ("FASTERCACHEARGS",)
+    RETURN_NAMES = ("fastercache", )
+    FUNCTION = "args"
+    CATEGORY = "CogVideoWrapper"
+    DESCRIPTION = "FasterCache (https://github.com/Vchitect/FasterCache) settings for the MochiWrapper, increases speed of sampling with cost of memory use and quality"
+
+    def args(self, start_step, hf_step, lf_step, cache_device):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+        fastercache = {
+            "start_step" : start_step,
+            "hf_step" : hf_step,
+            "lf_step" : lf_step,
+            "cache_device" : device if cache_device == "main_device" else offload_device
+        }
+        return (fastercache,)
+     
 #region Sampler
 class MochiSampler:
     @classmethod
@@ -464,6 +495,7 @@ class MochiSampler:
                 "cfg_schedule": ("FLOAT", {"forceInput": True, "tooltip": "Override cfg schedule with a list of ints"}),
                 "opt_sigmas": ("SIGMAS", {"tooltip": "Override sigma schedule and steps"}),
                 "samples": ("LATENT", ),
+                "fastercache": ("FASTERCACHEARGS", {"tooltip": "Optional FasterCache settings"}),
             }
         }
 
@@ -472,7 +504,7 @@ class MochiSampler:
     FUNCTION = "process"
     CATEGORY = "MochiWrapper"
 
-    def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames, cfg_schedule=None, opt_sigmas=None, samples=None):
+    def process(self, model, positive, negative, steps, cfg, seed, height, width, num_frames, cfg_schedule=None, opt_sigmas=None, samples=None, fastercache=None):
         mm.unload_all_models()
         mm.soft_empty_cache()
 
@@ -515,6 +547,7 @@ class MochiSampler:
             "negative_embeds": negative,
             "seed": seed,
             "samples": samples["samples"] if samples is not None else None,
+            "fastercache": fastercache
         }
         latents = model.run(args)
     
@@ -538,6 +571,9 @@ class MochiDecode:
             "tile_overlap_factor_height": ("FLOAT", {"default": 0.1666, "min": 0.0, "max": 1.0, "step": 0.001}),
             "tile_overlap_factor_width": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.001}),
             },
+            "optional": {
+                "unnormalize": ("BOOLEAN", {"default": False, "tooltip": "Unnormalize the latents before decoding"}),
+                },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -546,12 +582,13 @@ class MochiDecode:
     CATEGORY = "MochiWrapper"
 
     def decode(self, vae, samples, enable_vae_tiling, tile_sample_min_height, tile_sample_min_width, tile_overlap_factor_height, 
-               tile_overlap_factor_width, auto_tile_size, frame_batch_size):
+               tile_overlap_factor_width, auto_tile_size, frame_batch_size, unnormalize=False):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         intermediate_device = mm.intermediate_device()
         samples = samples["samples"]
-        samples = dit_latents_to_vae_latents(samples)
+        if unnormalize:
+            samples = dit_latents_to_vae_latents(samples)
         samples = samples.to(vae.dtype).to(device)
 
         B, C, T, H, W = samples.shape
@@ -631,7 +668,7 @@ class MochiDecode:
             return torch.cat(result_rows, dim=3)
         
         vae.to(device)
-        with torch.autocast(mm.get_autocast_device(device), dtype=torch.bfloat16):
+        with torch.autocast(mm.get_autocast_device(device), dtype=vae.dtype):
             if enable_vae_tiling and frame_batch_size > T:
                 logging.warning(f"Frame batch size is larger than the number of samples, setting to {T}")
                 frame_batch_size = T
@@ -666,6 +703,9 @@ class MochiDecodeSpatialTiling:
             "min_block_size": ("INT", {"default": 1, "min": 1, "max": 256, "step": 1, "tooltip": "Minimum number of pixels in each dimension when subdividing"}),
             "per_batch": ("INT", {"default": 6, "min": 1, "max": 256, "step": 1, "tooltip": "Number of samples per batch, in latent space (6 frames in 1 latent)"}),
             },
+            "optional": {
+                "unnormalize": ("BOOLEAN", {"default": True, "tooltip": "Unnormalize the latents before decoding"}),
+                },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -674,12 +714,13 @@ class MochiDecodeSpatialTiling:
     CATEGORY = "MochiWrapper"
 
     def decode(self, vae, samples, enable_vae_tiling, num_tiles_w, num_tiles_h, overlap, 
-               min_block_size, per_batch):
+               min_block_size, per_batch, unnormalize=True):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         intermediate_device = mm.intermediate_device()
         samples = samples["samples"]
-        samples = dit_latents_to_vae_latents(samples)
+        if unnormalize:
+            samples = dit_latents_to_vae_latents(samples)
         samples = samples.to(vae.dtype).to(device)
 
         B, C, T, H, W = samples.shape
@@ -735,24 +776,33 @@ class MochiImageEncode:
             "overlap": ("INT", {"default": 16, "min": 0, "max": 256, "step": 1, "tooltip": "Number of pixel of overlap between adjacent tiles"}),
             "min_block_size": ("INT", {"default": 1, "min": 1, "max": 256, "step": 1, "tooltip": "Minimum number of pixels in each dimension when subdividing"}),
             },
+            "optional": {
+                "normalize": ("BOOLEAN", {"default": True, "tooltip": "Normalize the images before encoding"}),
+                },
         }
 
     RETURN_TYPES = ("LATENT",)
     RETURN_NAMES = ("samples",)
-    FUNCTION = "decode"
+    FUNCTION = "encode"
     CATEGORY = "MochiWrapper"
 
-    def decode(self, encoder, images, enable_vae_tiling, num_tiles_w, num_tiles_h, overlap, min_block_size):
+    def encode(self, encoder, images, enable_vae_tiling, num_tiles_w, num_tiles_h, overlap, min_block_size, normalize=True):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         intermediate_device = mm.intermediate_device()
         from .mochi_preview.vae.model import apply_tiled
         B, H, W, C = images.shape
         
-        images = images.unsqueeze(0) * 2 - 1
-        images = rearrange(images, "t b h w c -> t c b h w")
-        images = images.to(device)
-        print(images.shape)
+        import torchvision.transforms as transforms
+        normalize = transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+        input_image_tensor = rearrange(images, 'b h w c -> b c h w')
+        input_image_tensor = normalize(input_image_tensor).unsqueeze(0)
+        input_image_tensor = rearrange(input_image_tensor, 'b t c h w -> b c t h w', t=B)
+        
+        #images = images.unsqueeze(0).sub_(0.5).div_(0.5)
+        #images = rearrange(input_image_tensor, "b c t h w -> t c b h w")
+        images = input_image_tensor.to(device)
+        
         encoder.to(device)
         print("images before encoding", images.shape)
         with torch.autocast(mm.get_autocast_device(device), dtype=encoder.dtype):
@@ -761,7 +811,8 @@ class MochiImageEncode:
                     latents = apply_tiled(encoder, video, num_tiles_w = num_tiles_w, num_tiles_h = num_tiles_h, overlap=overlap, min_block_size=min_block_size)
                 else:
                     latents = encoder(video)
-        latents = vae_latents_to_dit_latents(latents)
+        if normalize:
+            latents = vae_latents_to_dit_latents(latents)
         print("encoder output",latents.shape)
 
         return ({"samples": latents},)
@@ -840,7 +891,8 @@ NODE_CLASS_MAPPINGS = {
     "MochiTorchCompileSettings": MochiTorchCompileSettings,
     "MochiImageEncode": MochiImageEncode,
     "MochiLatentPreview": MochiLatentPreview,
-    "MochiSigmaSchedule": MochiSigmaSchedule
+    "MochiSigmaSchedule": MochiSigmaSchedule,
+    "MochiFasterCache": MochiFasterCache
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadAndLoadMochiModel": "(Down)load Mochi Model",
@@ -854,5 +906,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MochiTorchCompileSettings": "Mochi Torch Compile Settings",
     "MochiImageEncode": "Mochi Image Encode",
     "MochiLatentPreview": "Mochi Latent Preview",
-    "MochiSigmaSchedule": "Mochi Sigma Schedule"
+    "MochiSigmaSchedule": "Mochi Sigma Schedule",
+    "MochiFasterCache": "Mochi Faster Cache"
     }

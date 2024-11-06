@@ -7,15 +7,15 @@ import torch.nn.functional as F
 from .layers import (
     FeedForward,
     PatchEmbed,
-    RMSNorm,
     TimestepEmbedder,
 )
 
+
 from .mod_rmsnorm import modulated_rmsnorm
-from .residual_tanh_gated_rmsnorm import (residual_tanh_gated_rmsnorm)
-from .rope_mixed import (compute_mixed_rotation, create_position_matrix)
+from .residual_tanh_gated_rmsnorm import residual_tanh_gated_rmsnorm
+from .rope_mixed import compute_mixed_rotation, create_position_matrix
 from .temporal_rope import apply_rotary_emb_qk_real
-from .utils import (pool_tokens, modulate)
+from .utils import pool_tokens, modulate
 
 try:
     from flash_attn import flash_attn_func
@@ -103,7 +103,8 @@ class AttentionPool(nn.Module):
         x = x.squeeze(2).flatten(1, 2)  # (B, D = H * head_dim)
         x = self.to_out(x)
         return x
-
+    
+#region Attention
 class AsymmetricAttention(nn.Module):
     def __init__(
         self,
@@ -119,6 +120,7 @@ class AsymmetricAttention(nn.Module):
         softmax_scale: Optional[float] = None,
         device: Optional[torch.device] = None,
         attention_mode: str = "sdpa",
+        rms_norm_func: bool = False,
         
     ):
         super().__init__()
@@ -144,11 +146,37 @@ class AsymmetricAttention(nn.Module):
         self.qkv_y = nn.Linear(dim_y, 3 * dim_x, bias=qkv_bias, device=device)
 
         # Query and key normalization for stability.
-        assert qk_norm
-        self.q_norm_x = RMSNorm(self.head_dim, device=device)
-        self.k_norm_x = RMSNorm(self.head_dim, device=device)
-        self.q_norm_y = RMSNorm(self.head_dim, device=device)
-        self.k_norm_y = RMSNorm(self.head_dim, device=device)
+        #assert qk_norm
+        if rms_norm_func == "flash_attn_triton": #use the same rms_norm_func
+            try:
+                from flash_attn.ops.triton.layer_norm import RMSNorm as FlashTritonRMSNorm #slightly faster
+                @torch.compiler.disable() #cause NaNs when compiled for some reason
+                class RMSNorm(FlashTritonRMSNorm):
+                    pass
+            except:
+                raise ImportError("Flash Triton RMSNorm not available.")
+        elif rms_norm_func == "flash_attn":
+            try:
+                from flash_attn.ops.rms_norm import RMSNorm as FlashRMSNorm #slightly faster
+                @torch.compiler.disable() #cause NaNs when compiled for some reason
+                class RMSNorm(FlashRMSNorm):
+                    pass
+            except:
+                raise ImportError("Flash RMSNorm not available.")
+        elif rms_norm_func == "apex":
+            from apex.normalization import FusedRMSNorm as ApexRMSNorm
+            class RMSNorm(ApexRMSNorm):
+                pass
+        else:
+            from .layers import RMSNorm
+        norm_kwargs = {}
+        if rms_norm_func != "apex":
+            norm_kwargs['device'] = device
+
+        self.q_norm_x = RMSNorm(self.head_dim, **norm_kwargs)
+        self.k_norm_x = RMSNorm(self.head_dim, **norm_kwargs)
+        self.q_norm_y = RMSNorm(self.head_dim, **norm_kwargs)
+        self.k_norm_y = RMSNorm(self.head_dim, **norm_kwargs)
 
         # Output layers. y features go back down from dim_x -> dim_y.
         self.proj_x = nn.Linear(dim_x, dim_x, bias=out_bias, device=device)
@@ -210,7 +238,6 @@ class AsymmetricAttention(nn.Module):
                 )
             return out
 
-    @torch.compiler.disable()
     def run_attention(
         self,
         q,
@@ -270,7 +297,8 @@ class AsymmetricAttention(nn.Module):
 
         y = self.proj_y(o)
         return x, y
-
+    
+#region Blocks
 class AsymmetricJointBlock(nn.Module):
     def __init__(
         self,
@@ -283,6 +311,7 @@ class AsymmetricJointBlock(nn.Module):
         update_y: bool = True,  # Whether to update text tokens in this block.
         device: Optional[torch.device] = None,
         attention_mode: str = "sdpa",
+        rms_norm_func: str = "default",
         **block_kwargs,
     ):
         super().__init__()
@@ -295,6 +324,9 @@ class AsymmetricJointBlock(nn.Module):
             self.mod_y = nn.Linear(hidden_size_x, 4 * hidden_size_y, device=device)
         else:
             self.mod_y = nn.Linear(hidden_size_x, hidden_size_y, device=device)
+
+        self.cached_x_attention = [None, None]
+        self.cached_y_attention = [None, None]
         
         # Self-attention:
         self.attn = AsymmetricAttention(
@@ -304,12 +336,13 @@ class AsymmetricJointBlock(nn.Module):
             update_y=update_y,
             device=device,
             attention_mode=attention_mode,
+            rms_norm_func=rms_norm_func,
             **block_kwargs,
         )
 
         # MLP.
         mlp_hidden_dim_x = int(hidden_size_x * mlp_ratio_x)
-        assert mlp_hidden_dim_x == int(1536 * 8)
+        #assert mlp_hidden_dim_x == int(1536 * 8)
         self.mlp_x = FeedForward(
             in_features=hidden_size_x,
             hidden_size=mlp_hidden_dim_x,
@@ -334,6 +367,9 @@ class AsymmetricJointBlock(nn.Module):
         x: torch.Tensor,
         c: torch.Tensor,
         y: torch.Tensor,
+        fastercache_counter: Optional[int] = 0,
+        fastercache_start_step: Optional[int]  = 1000,
+        fastercache_device: Optional[torch.device] = None,
         **attn_kwargs,
     ):
         """Forward pass of a block.
@@ -360,16 +396,37 @@ class AsymmetricJointBlock(nn.Module):
         else:
             scale_msa_y = mod_y
         
-        # Self-attention block.
-        x_attn, y_attn = self.attn(
-            x,
-            y,
-            scale_x=scale_msa_x,
-            scale_y=scale_msa_y,
-            **attn_kwargs,
-        )
+        #region fastercache
+        B = x.shape[0]
+        #print("x", x.shape) #([1, 9540, 3072])
+        if fastercache_counter >= fastercache_start_step + 3 and fastercache_counter%3!=0 and self.cached_x_attention[-1].shape[0] >= B:
+            x_attn = (
+                self.cached_x_attention[1][:B] + 
+                (self.cached_x_attention[1][:B] - self.cached_x_attention[0][:B]) 
+                * 0.3
+                ).to(x.device, non_blocking=True)
+            y_attn = (
+                self.cached_y_attention[1][:B] + 
+                (self.cached_y_attention[1][:B] - self.cached_y_attention[0][:B]) 
+                * 0.3
+                ).to(x.device, non_blocking=True)
+        else:
+            # Self-attention block.
+            x_attn, y_attn = self.attn(
+                x,
+                y,
+                scale_x=scale_msa_x,
+                scale_y=scale_msa_y,
+                **attn_kwargs,
+            )
+            if fastercache_counter == fastercache_start_step:
+                self.cached_x_attention = [x_attn.to(fastercache_device), x_attn.to(fastercache_device)]
+                self.cached_y_attention = [y_attn.to(fastercache_device), y_attn.to(fastercache_device)]    
+            elif fastercache_counter > fastercache_start_step:
+                self.cached_x_attention[-1].copy_(x_attn.to(fastercache_device))
+                self.cached_y_attention[-1].copy_(y_attn.to(fastercache_device))
 
-        assert x_attn.size(1) == N
+        #assert x_attn.size(1) == N
         x = residual_tanh_gated_rmsnorm(x, x_attn, gate_msa_x)
         if self.update_y:
             y = residual_tanh_gated_rmsnorm(y, y_attn, gate_msa_y)
@@ -422,7 +479,7 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
-
+#region Model
 class AsymmDiTJoint(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -450,6 +507,7 @@ class AsymmDiTJoint(nn.Module):
         rope_theta: float = 10000.0,
         device: Optional[torch.device] = None,
         attention_mode: str = "sdpa",
+        rms_norm_func: str = "default",
         **block_kwargs,
     ):
         super().__init__()
@@ -518,6 +576,7 @@ class AsymmDiTJoint(nn.Module):
                 update_y=update_y,
                 device=device,
                 attention_mode=attention_mode,
+                rms_norm_func=rms_norm_func,
                 **block_kwargs,
             )
 
@@ -551,7 +610,7 @@ class AsymmDiTJoint(nn.Module):
         T, H, W = x.shape[-3:]
         pH, pW = H // self.patch_size, W // self.patch_size
         x = self.embed_x(x)  # (B, N, D), where N = T * H * W / patch_size ** 2
-        assert x.ndim == 3
+        #assert x.ndim == 3
 
         # Construct position array of size [N, 3].
         # pos[:, 0] is the frame index for each location,
@@ -559,7 +618,7 @@ class AsymmDiTJoint(nn.Module):
         # pos[:, 2] is the column index for each location.
         pH, pW = H // self.patch_size, W // self.patch_size
         N = T * pH * pW
-        assert x.size(1) == N
+        #assert x.size(1) == N
         pos = create_position_matrix(T, pH=pH, pW=pW, device=x.device, dtype=torch.float32)  # (N, 3)
         rope_cos, rope_sin = compute_mixed_rotation(freqs=self.pos_frequencies, pos=pos)  # Each are (N, num_heads, dim // 2)
 
@@ -584,7 +643,8 @@ class AsymmDiTJoint(nn.Module):
         y_mask: List[torch.Tensor],
         rope_cos: torch.Tensor = None,
         rope_sin: torch.Tensor = None,
-        packed_indices: Optional[dict] = None,
+        fastercache: Optional[Dict] = None,
+        fastercache_counter: Optional[int]=0,
     ):
         """Forward pass of DiT.
 
@@ -604,6 +664,14 @@ class AsymmDiTJoint(nn.Module):
                 x, sigma, y_feat[0], y_mask[0]
             )
         del y_mask
+
+        if fastercache is not None:
+            fastercache_start_step = fastercache["start_step"]
+            fastercache_device = fastercache["cache_device"]
+        else:
+            fastercache_start_step = 1000
+            fastercache_device = None
+        #print(fastercache_counter)
         
         for i, block in enumerate(self.blocks):
             x, y_feat = block(
@@ -613,7 +681,11 @@ class AsymmDiTJoint(nn.Module):
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
                 num_tokens=num_tokens,
-            )  # (B, M, D), (B, L, D)
+                fastercache_counter = fastercache_counter,
+                fastercache_start_step = fastercache_start_step,
+                fastercache_device = fastercache_device,
+
+                )  # (B, M, D), (B, L, D)
         del y_feat  # Final layers don't use dense text features.
 
         x = self.final_layer(x, c)  # (B, M, patch_size ** 2 * out_channels)
