@@ -34,6 +34,7 @@ except:
 
 import torch
 import torch.utils.data
+import torch._dynamo
 
 from tqdm import tqdm
 from comfy.utils import ProgressBar, load_torch_file
@@ -161,6 +162,8 @@ class T2VSynthMochiModel:
 
         #torch.compile
         if compile_args is not None:
+            torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
+            log.info(f"Set dynamo cache size limit to {torch._dynamo.config.cache_size_limit}")
             if compile_args["compile_dit"]:
                 for i, block in enumerate(model.blocks):
                     model.blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"])
@@ -308,7 +311,7 @@ class T2VSynthMochiModel:
                 
         comfy_pbar = ProgressBar(sample_steps)
 
-        if hasattr(self.dit, "cublas_half_matmul") and self.dit.cublas_half_matmul:
+        if (hasattr(self.dit, "cublas_half_matmul") and self.dit.cublas_half_matmul) or self.device.type == "mps":
             autocast_dtype = torch.float16
         else:
             autocast_dtype = torch.float16

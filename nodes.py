@@ -119,6 +119,10 @@ class DownloadAndLoadMochiModel:
         mm.soft_empty_cache()
 
         dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
+        if "fp8" in precision:
+            vae_dtype = torch.bfloat16
+        else:
+            vae_dtype = dtype
 
         # Transformer model
         model_download_path = os.path.join(folder_paths.models_dir, 'diffusion_models', 'mochi')
@@ -174,14 +178,15 @@ class DownloadAndLoadMochiModel:
                     nonlinearity="silu",
                     output_nonlinearity="silu",
                     causal=True,
+                    dtype=vae_dtype,
                 )
         vae_sd = load_torch_file(vae_path)
         if is_accelerate_available:
             for key in vae_sd:
-                set_module_tensor_to_device(vae, key, dtype=torch.bfloat16, device=offload_device, value=vae_sd[key])
+                set_module_tensor_to_device(vae, key, dtype=vae_dtype, device=offload_device, value=vae_sd[key])
         else:
             vae.load_state_dict(vae_sd, strict=True)
-            vae.eval().to(torch.bfloat16).to("cpu")
+            vae.eval().to(vae_dtype).to("cpu")
         del vae_sd
 
         return (model, vae,)
@@ -242,6 +247,7 @@ class MochiTorchCompileSettings:
                 "compile_dit": ("BOOLEAN", {"default": True, "tooltip": "Compiles all transformer blocks"}),
                 "compile_final_layer": ("BOOLEAN", {"default": True, "tooltip": "Enable compiling final layer."}),
                 "dynamic": ("BOOLEAN", {"default": False, "tooltip": "Enable dynamic mode"}),
+                "dynamo_cache_size_limit": ("INT", {"default": 64, "min": 0, "max": 1024, "step": 1, "tooltip": "torch._dynamo.config.cache_size_limit"}),
             },
         }
     RETURN_TYPES = ("MOCHICOMPILEARGS",)
@@ -250,7 +256,7 @@ class MochiTorchCompileSettings:
     CATEGORY = "MochiWrapper"
     DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
 
-    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer, dynamic):
+    def loadmodel(self, backend, fullgraph, mode, compile_dit, compile_final_layer, dynamic, dynamo_cache_size_limit):
 
         compile_args = {
             "backend": backend,
@@ -259,6 +265,7 @@ class MochiTorchCompileSettings:
             "compile_dit": compile_dit,
             "compile_final_layer": compile_final_layer,
             "dynamic": dynamic,
+            "dynamo_cache_size_limit": dynamo_cache_size_limit,
         }
 
         return (compile_args, )
@@ -308,6 +315,16 @@ class MochiVAELoader:
                     dtype=dtype,
                 )
         vae_sd = load_torch_file(vae_path)
+        
+        #support loading from combined VAE
+        if vae_sd.get("decoder.blocks.0.0.bias") is not None:
+            new_vae_sd = {}
+            for k, v in vae_sd.items():
+                if k.startswith("decoder."):
+                    new_k = k[len("decoder."):]
+                    new_vae_sd[new_k] = v
+            vae_sd = new_vae_sd
+        
         if is_accelerate_available:
             for name, param in vae.named_parameters():
                 set_module_tensor_to_device(vae, name, dtype=dtype, device=offload_device, value=vae_sd[name])
@@ -376,6 +393,16 @@ class MochiVAEEncoderLoader:
             )
 
         encoder_sd = load_torch_file(vae_path)
+
+        #support loading from combined VAE
+        if encoder_sd.get("encoder.layers.0.bias") is not None:
+            new_vae_sd = {}
+            for k, v in encoder_sd.items():
+                if k.startswith("encoder."):
+                    new_k = k[len("encoder."):]
+                    new_vae_sd[new_k] = v
+            encoder_sd = new_vae_sd
+
         if is_accelerate_available:
             for name, param in encoder.named_parameters():
                 set_module_tensor_to_device(encoder, name, dtype=dtype, device=offload_device, value=encoder_sd[name])
@@ -843,8 +870,21 @@ class MochiLatentPreview:
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
  
-        latent_rgb_factors = [[0.1236769792512748, 0.11775175335219157, -0.17700629766423637], [-0.08504104329270078, 0.026605813147523694, -0.006843165704926019], [-0.17093308616366876, 0.027991854696200386, 0.14179146288816308], [-0.17179555328757623, 0.09844317368603078, 0.14470997015982784], [-0.16975067171668484, -0.10739852629856643, -0.1894254942909962], [-0.19315259266769888, -0.011029760569485209, -0.08519702054654255], [-0.08399895091432583, -0.0964246452052032, -0.033622359523655665], [0.08148916330842498, 0.027500645903400067, -0.06593099749891196], [0.0456603103902293, -0.17844808072462398, 0.04204775167149785], [0.001751626383204502, -0.030567890189647867, -0.022078082809772193], [0.05110631095056278, -0.0709677393548804, 0.08963683539504264], [0.010515800868829, -0.18382052841762514, -0.08554553339721907]]
-
+        #latent_rgb_factors = [[0.1236769792512748, 0.11775175335219157, -0.17700629766423637], [-0.08504104329270078, 0.026605813147523694, -0.006843165704926019], [-0.17093308616366876, 0.027991854696200386, 0.14179146288816308], [-0.17179555328757623, 0.09844317368603078, 0.14470997015982784], [-0.16975067171668484, -0.10739852629856643, -0.1894254942909962], [-0.19315259266769888, -0.011029760569485209, -0.08519702054654255], [-0.08399895091432583, -0.0964246452052032, -0.033622359523655665], [0.08148916330842498, 0.027500645903400067, -0.06593099749891196], [0.0456603103902293, -0.17844808072462398, 0.04204775167149785], [0.001751626383204502, -0.030567890189647867, -0.022078082809772193], [0.05110631095056278, -0.0709677393548804, 0.08963683539504264], [0.010515800868829, -0.18382052841762514, -0.08554553339721907]]
+        latent_rgb_factors =[
+            [-0.0069, -0.0045,  0.0018],
+            [ 0.0154, -0.0692, -0.0274],
+            [ 0.0333,  0.0019,  0.0206],
+            [-0.1390,  0.0628,  0.1678],
+            [-0.0725,  0.0134, -0.1898],
+            [ 0.0074, -0.0270, -0.0209],
+            [-0.0176, -0.0277, -0.0221],
+            [ 0.5294,  0.5204,  0.3852],
+            [-0.0326, -0.0446, -0.0143],
+            [-0.0659,  0.0153, -0.0153],
+            [ 0.0185, -0.0217,  0.0014],
+            [-0.0396, -0.0495, -0.0281]
+        ]
         # import random
         # random.seed(seed)
         # latent_rgb_factors = [[random.uniform(min_val, max_val) for _ in range(3)] for _ in range(12)]
@@ -852,7 +892,7 @@ class MochiLatentPreview:
         # print(latent_rgb_factors)
        
         
-        latent_rgb_factors_bias = [0,0,0]
+        latent_rgb_factors_bias = [-0.0940, -0.1418, -0.1453]
         
         latent_rgb_factors = torch.tensor(latent_rgb_factors, device=latents.device, dtype=latents.dtype).transpose(0, 1)
         latent_rgb_factors_bias = torch.tensor(latent_rgb_factors_bias, device=latents.device, dtype=latents.dtype)
